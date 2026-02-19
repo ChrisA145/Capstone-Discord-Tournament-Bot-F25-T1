@@ -1,6 +1,7 @@
 # import peewee
 # from common.database_connection import tournament_dbc
 from datetime import datetime
+import os
 from config import settings
 import sqlite3
 import json
@@ -18,6 +19,8 @@ class Tournament_DB:
     #The default out put of sqlit3 is a list of tubles
     #Inorder to get list of dictionary data format, we use row_factory
     def db_connect(self):
+        db_path = os.path.abspath(self.db_name)
+        logger.info(f"[DB] Opening SQLite DB at: {db_path}")
         self.connection = sqlite3.connect(self.db_name)
         # self.connection.row_factory = sqlite3.Row
         self.cursor = self.connection.cursor()

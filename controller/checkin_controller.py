@@ -14,6 +14,8 @@ class CheckinController(commands.Cog):
         self.active_checkins = {}  # guild_id -> CheckinView
 
     def get_active_checkin_view(self, guild_id: int):
+        if not hasattr(self, "active_checkins"):
+            self.active_checkins = {}
         return self.active_checkins.get(guild_id)
     
     @app_commands.command(name="checkin_game", description="Start check-in for the next game")
@@ -38,6 +40,8 @@ class CheckinController(commands.Cog):
             game_checkin_view = CheckinView(timeout=timeout)
 
             # Store active check-in session
+            if not hasattr(self, "active_checkins"):
+                self.active_checkins = {}
             self.active_checkins[guild_id] = game_checkin_view
             
             # Find the channel to send the check-in UI

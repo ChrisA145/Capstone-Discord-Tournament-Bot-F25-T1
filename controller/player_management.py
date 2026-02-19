@@ -581,6 +581,24 @@ class PlayerManagement(commands.Cog):
                 
                 # Commit changes
                 db.connection.commit()
+
+                # --- Add simulated players into the active check-in pool ---
+                checkin_cog = self.bot.get_cog("CheckinController")
+                if not checkin_cog:
+                    await interaction.followup.send("Check-in module not loaded (CheckinController not found).")
+                    return
+
+                view = checkin_cog.get_active_checkin_view(interaction.guild.id)
+                if not view:
+                    await interaction.followup.send("No active check-in session. Run /checkin_game first.")
+                    return
+
+                # Your simulated player IDs are 9000000 + i (and CheckinView stores strings)
+                simulated_ids = {str(9000000 + i) for i in range(players_created)}
+                view.checked_in_users.update(simulated_ids)
+
+                await interaction.followup.send(f"✅ Added {len(simulated_ids)} simulated players to the check-in pool.")
+
                 
                 # Final summary embed
                 summary_embed = discord.Embed(

@@ -10,20 +10,39 @@ def compute_wr_percent(wins: int, losses: int) -> float:
         return 50.0
     return round((wins / games) * 100.0, 2)
 
+
+def ping(self):
+    # simple read to confirm auth + access
+    _ = self.players_ws.title
+
 @dataclass
 class SheetsCache:
     player_row_map: Dict[str, int]
     last_loaded: float
 
 class SheetSync:
-    def __init__(self, gc, spreadsheet_name: str):
+    def __init__(self, gc, sheet_id: str):
         self.gc = gc
-        self.ss = gc.open(spreadsheet_name)
-        self.players_ws = self.ss.worksheet("Players")
-        self.matches_ws = self.ss.worksheet("Matches")
+        self.sheet = gc.open_by_key(sheet_id)
+        self.players_ws = self.sheet.worksheet("Players")
+        self.matches_ws = self.sheet.worksheet("Matches")
 
         self.cache: Optional[SheetsCache] = None
         self.cache_ttl_seconds = 300  # refresh every 5 minutes
+
+    def ping(self) -> str:
+        """
+        Simple connectivity test.
+        Verifies spreadsheet and required worksheets exist.
+        """
+        # Check spreadsheet access
+        _ = self.sheet.title
+
+        # Check required worksheets
+        _ = self.players_ws.title
+        _ = self.matches_ws.title
+
+        return "ok"
 
     def _load_player_row_map(self) -> Dict[str, int]:
         """

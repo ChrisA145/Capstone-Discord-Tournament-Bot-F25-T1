@@ -1,11 +1,9 @@
-from aiohttp.web_routedef import view
 import discord
 import asyncio
 from discord import app_commands
 from discord.ext import commands
 from config import settings
 from model.dbc_model import Tournament_DB, Player, Game
-from unit_testing.test_team_swap import match_id
 from view.match_results_view import (
     MatchResultView, 
     create_mvp_voting_button,
@@ -20,8 +18,21 @@ class MatchResultsController(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
     
+    @app_commands.command(name="sheets_ping", description="Test Google Sheets connectivity")
+    async def sheets_ping(self, interaction):
+        sheet_sync = getattr(self.bot, "sheet_sync", None)
+        if not sheet_sync:
+            await interaction.response.send_message("❌ SheetSync is not initialized.", ephemeral=True)
+            return
+        try:
+            # you can implement a simple method in SheetSync like `ping()`
+            await asyncio.to_thread(sheet_sync.ping)
+            await interaction.response.send_message("✅ SheetSync ping successful.", ephemeral=True)
+        except Exception as e:
+            await interaction.response.send_message(f"❌ SheetSync ping failed: {e}", ephemeral=True)
+
     @app_commands.command(name="record_match_results", description="Record the outcomes of multiple matches")
-    async def record_match_results(self, interaction: discord.Interaction):
+    async def record_match_results(self, interaction):
         """Command to record results for multiple matches at once"""
         if not interaction.user.guild_permissions.administrator:
             await interaction.response.send_message(
@@ -109,7 +120,7 @@ class MatchResultsController(commands.Cog):
         match_id="The ID of the match (from run_matchmaking command)",
         winning_team="The number of the winning team (1 or 2)"
     )
-    async def record_match_result(self, interaction: discord.Interaction, match_id: str, winning_team: int):
+    async def record_match_result(self, interaction, match_id: str, winning_team: int):
         """Command to record the result of a single match"""
         if not interaction.user.guild_permissions.administrator:
             await interaction.response.send_message(

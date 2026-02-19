@@ -276,9 +276,9 @@ class MatchmakingController(commands.Cog):
                 await interaction.followup.send("No active check-in session. Start one with /checkin_game.")
                 return
 
-            checked_in_ids = [str(x) for x in view.checked_in_users]
+            checked_in_ids = [(x) for x in view.checked_in_users]
 
-            if len(checked_in_ids) != players_per_game:
+            if len(checked_in_ids) < players_per_game:
                 await interaction.followup.send(
                     f"Need exactly {players_per_game} checked-in players. Current: {len(checked_in_ids)}"
                 )
