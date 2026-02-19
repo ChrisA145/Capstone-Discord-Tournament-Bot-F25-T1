@@ -1,0 +1,25 @@
+Log/*
+!Log/.gitkeep
+.env
+venv
+*.db
+*.log
+test_folder/*
+run.py
+ksu_tournament.db
+cached_details.json
+ksu_Esports_Tournament
+tournament_dbc
+match_making/*
+/service_account.json
+service_account.json.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
