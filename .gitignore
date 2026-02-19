@@ -11,7 +11,7 @@ cached_details.json
 ksu_Esports_Tournament
 tournament_dbc
 match_making/*
-/service_account.json
+<<<<<<< HEAD
 service_account.json.json
 
 # Python
@@ -23,3 +23,5 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+=======
+>>>>>>> 913e438f8f11c32ddf6661b294398ab894c47e07
