@@ -11,7 +11,11 @@ logger = settings.logging.getLogger("discord")
 class CheckinController(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+        self.active_checkins = {}  # guild_id -> CheckinView
 
+    def get_active_checkin_view(self, guild_id: int):
+        return self.active_checkins.get(guild_id)
+    
     @app_commands.command(name="checkin_game", description="Start check-in for the next game")
     @app_commands.describe(timeout="Check-in duration in seconds (default: 900 seconds/15 minutes)")
     async def checkin(self, interaction: discord.Interaction, timeout: int = 900):
@@ -32,6 +36,9 @@ class CheckinController(commands.Cog):
 
             # Create the check-in UI first
             game_checkin_view = CheckinView(timeout=timeout)
+
+            # Store active check-in session
+            self.active_checkins[guild_id] = game_checkin_view
             
             # Find the channel to send the check-in UI
             target_channel = None
@@ -76,6 +83,9 @@ class CheckinController(commands.Cog):
                 
                 # Schedule deletion after timeout
                 await asyncio.sleep(timeout)
+
+                # Remove active session
+                self.active_checkins.pop(guild_id, None)
                 
                 try:
                     # Try to delete the message when check-in expires

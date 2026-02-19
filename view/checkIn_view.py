@@ -16,6 +16,7 @@ class CheckinView(discord.ui.View):
     def __init__(self, timeout = 900):
         super().__init__(timeout=timeout)
         self.timeout = timeout
+        self.checked_in_users: set[str] = set()
         self.viewStart_time = time.time()
 
     async def disable_all_items(self):
@@ -36,6 +37,7 @@ class CheckinView(discord.ui.View):
     @discord.ui.button(label="Checkin", style=discord.ButtonStyle.success)
     async def Checkin(self, interaction: discord.Interaction, button:discord.ui.Button):
         user = interaction.user
+        self.checked_in_users.add(str(user.id))
         dm_to_user = await user.create_dm()
         self.user_dm = dm_to_user
         remaining_time = self.timeout - (time.time() - self.viewStart_time)

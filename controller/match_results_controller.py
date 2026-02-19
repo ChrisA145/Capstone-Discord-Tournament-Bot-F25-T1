@@ -1,9 +1,11 @@
+from aiohttp.web_routedef import view
 import discord
 import asyncio
 from discord import app_commands
 from discord.ext import commands
 from config import settings
 from model.dbc_model import Tournament_DB, Player, Game
+from unit_testing.test_team_swap import match_id
 from view.match_results_view import (
     MatchResultView, 
     create_mvp_voting_button,
@@ -75,6 +77,8 @@ class MatchResultsController(commands.Cog):
 
             # Process the results
             results_processed = self._process_match_results(db, view.processed_results)
+            for mid in view.processed_results.keys():
+                await self._sync_match_to_sheets(db, mid)
 
             # Send final confirmation
             if results_processed > 0:
@@ -130,7 +134,9 @@ class MatchResultsController(commands.Cog):
 
             # Process the match result
             results = {match_id: winning_team}
-            players_updated = self._process_match_results(db, results)
+            players_updated, _ = self._process_match_results(db, results)
+
+            await self._sync_match_to_sheets(db, match_id)
 
             # Create callback for MVP voting button
             async def mvp_callback(inter):
@@ -164,6 +170,9 @@ class MatchResultsController(commands.Cog):
         """
         results_processed = 0
         players_updated = 0
+
+        affected_player_ids = set()
+        match_rows = []  # rows to append to Google Sheet "Matches" tab
         
         for match_id, winning_team in match_results.items():
             # Update winners
@@ -203,6 +212,8 @@ class MatchResultsController(commands.Cog):
 
             # Update player stats in the Game table
             for player_id, team in players:
+                affected_player_ids.add(player_id)
+                
                 # Get current player stats
                 db.cursor.execute(
                     "SELECT wins, losses FROM game WHERE user_id = ? ORDER BY game_date DESC LIMIT 1",
@@ -210,33 +221,36 @@ class MatchResultsController(commands.Cog):
                 )
                 result = db.cursor.fetchone()
 
-                if result:
-                    current_wins, current_losses = result
+                if not result:
+                    continue
+                
+                current_wins, current_losses = result
 
-                    # Set default values if None
-                    current_wins = current_wins if current_wins is not None else 0
-                    current_losses = current_losses if current_losses is not None else 0
+                # Set default values if None
+                current_wins = current_wins if current_wins is not None else 0
+                current_losses = current_losses if current_losses is not None else 0
 
-                    # Update based on match result
-                    if team == winning_team_name:
-                        new_wins = current_wins + 1
-                        update_query = """
-                            UPDATE game SET wins = ?
-                            WHERE user_id = ? AND game_date = (
-                                SELECT MAX(game_date) FROM game WHERE user_id = ?
-                            )
-                        """
-                        db.cursor.execute(update_query, (new_wins, player_id, player_id))
-                    elif team == losing_team_name:  # Exclude participation players
-                        new_losses = current_losses + 1
-                        update_query = """
-                            UPDATE game SET losses = ?
-                            WHERE user_id = ? AND game_date = (
-                                SELECT MAX(game_date) FROM game WHERE user_id = ?
-                            )
-                        """
-                        db.cursor.execute(update_query, (new_losses, player_id, player_id))
-                    
+                 # Update based on match result
+                if team == winning_team_name:
+                    new_wins = current_wins + 1
+                    update_query = """
+                        UPDATE game SET wins = ?
+                        WHERE user_id = ? AND game_date = (
+                            SELECT MAX(game_date) FROM game WHERE user_id = ?
+                        )
+                    """
+                    db.cursor.execute(update_query, (new_wins, player_id, player_id))
+                elif team == losing_team_name:  # Exclude participation players
+                    new_losses = current_losses + 1
+                    update_query = """
+                        UPDATE game SET losses = ?
+                        WHERE user_id = ? AND game_date = (
+                            SELECT MAX(game_date) FROM game WHERE user_id = ?
+                        )
+                    """
+                    db.cursor.execute(update_query, (new_losses, player_id, player_id))
+                
+                if team in [winning_team_name, losing_team_name]:
                     players_updated += 1
 
             # Make sure to commit changes after each match is processed
@@ -249,7 +263,73 @@ class MatchResultsController(commands.Cog):
         db.connection.commit()
         logger.info(f"Final commit complete, processed {results_processed} matches")
         
-        return players_updated
+        return players_updated, affected_player_ids
+
+    async def _sync_match_to_sheets(self, db: Tournament_DB, match_id: str):
+        sheet_sync = getattr(self.bot, "sheet_sync", None)
+        if not sheet_sync:
+            logger.info("SheetSync not initialized; skipping Sheets mirror.")
+            return
+
+        # 1) Build match rows (append-only)
+        db.cursor.execute(
+            "SELECT user_id, teamUp, win, loss FROM Matches WHERE teamId = ?",
+            (match_id,)
+        )
+        match_entries = db.cursor.fetchall()
+
+        # Match sheet row format example:
+        # [match_id, user_id, teamUp, win, loss]
+        match_rows = []
+        affected_ids = set()
+
+        for user_id, teamUp, win, loss in match_entries:
+            affected_ids.add(user_id)
+            match_rows.append([match_id, user_id, teamUp, win, loss])
+
+        # 2) Pull latest stats for affected players
+        players_for_sync = []
+        for pid in affected_ids:
+            db.cursor.execute("""
+                SELECT p.user_id, p.game_name, p.tag_id,
+                    g.tier, g.rank, g.role, g.wins, g.losses,
+                    g.manual_tier, g.toxicity_points, g.mvp_count
+                FROM player p
+                JOIN game g ON p.user_id = g.user_id
+                WHERE p.user_id = ?
+                ORDER BY g.game_date DESC
+                LIMIT 1
+            """, (pid,))
+            row = db.cursor.fetchone()
+            if not row:
+                continue
+
+            (player_id, game_name, tag_id, tier, rank, role,
+            wins, losses, manual_tier, toxicity_points, mvp_count) = row
+
+            players_for_sync.append({
+                "player_id": player_id,
+                "game_name": game_name,
+                "tag_id": tag_id,
+                "tier": (tier or "default"),
+                "rank": (rank or "V"),
+                "role": role or "",
+                "wins": wins or 0,
+                "losses": losses or 0,
+                "manual_tier": manual_tier,
+                "toxicity_points": toxicity_points or 0,
+                "mvp_count": mvp_count or 0,
+            })
+
+        # 3) Offload Sheets calls to a thread (gspread is blocking)
+        try:
+            await asyncio.to_thread(sheet_sync.append_match_rows, match_rows)
+            await asyncio.to_thread(sheet_sync.upsert_players_batch, players_for_sync)
+            logger.info(f"Synced match {match_id} to Sheets: {len(players_for_sync)} players.")
+        except Exception as ex:
+            logger.error(f"Sheets sync failed (non-fatal) for match {match_id}: {ex}")
+
+
 
     async def _start_mvp_voting(self, interaction, match_id):
         """Start MVP voting for a match

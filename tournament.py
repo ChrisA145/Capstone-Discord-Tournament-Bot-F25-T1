@@ -9,6 +9,10 @@ from common.database_connection import tournament_dbc
 from common.cached_details import Details_Cached
 import warnings
 warnings.filterwarnings("ignore", message="'audioop' is deprecated")
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
+from sheet_sync import SheetSync   # adjust path if it's in /common or /utils
+
 
 '''
 we use bot.start(): 
@@ -28,7 +32,27 @@ async def main():
 
 
     sys_client = commands.Bot(command_prefix="$", intents=intents)
+
+    try:
+        # Initialize Google Sheets sync ONCE
+        scope = [
+            "https://spreadsheets.google.com/feeds",
+            "https://www.googleapis.com/auth/drive"
+        ]
+        creds = ServiceAccountCredentials.from_json_keyfile_name(
+            "service_account.json.json",  # <- path to your service account json
+            scope
+        )
+        gc = gspread.authorize(creds)
+
+        
+        sys_client.sheet_sync = SheetSync(gc, settings.GOOGLE_SHEET_NAME)
+    except Exception as e:
+            sys_client.sheet_sync = None
+            logger.error(f"Failed to initialize Google Sheets sync: {e}")
     
+    
+
     # Add a flag to track bot initialization state
     sys_client.is_fully_initialized = False
 

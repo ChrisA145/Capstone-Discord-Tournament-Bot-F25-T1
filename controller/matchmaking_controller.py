@@ -263,42 +263,44 @@ class MatchmakingController(commands.Cog):
         if interaction.user.guild_permissions.administrator:
             await interaction.response.defer(thinking=True)
 
+            # Instead of selecting all registered players from DB and splitting into pools, we will only select the checked-in players for matchmaking
+            guild_id = interaction.guild.id
+
+            checkin_cog = self.bot.get_cog("CheckinController")
+            if not checkin_cog:
+                await interaction.followup.send("Check-in module not loaded (CheckinController not found).")
+                return
+
+            view = checkin_cog.get_active_checkin_view(guild_id)
+            if not view:
+                await interaction.followup.send("No active check-in session. Start one with /checkin_game.")
+                return
+
+            checked_in_ids = [str(x) for x in view.checked_in_users]
+
+            if len(checked_in_ids) != players_per_game:
+                await interaction.followup.send(
+                    f"Need exactly {players_per_game} checked-in players. Current: {len(checked_in_ids)}"
+                )
+                return
+            
             try:
                 # Get all eligible players
                 db = Tournament_DB()
-                
                 all_players = []
+                placeholders = ",".join(["?"] * len(checked_in_ids))
 
                 try:
                     # Get all players with game data
-                    db.cursor.execute("""
-                        SELECT p.user_id, p.game_name, p.tag_id, g.tier, g.rank, g.role, g.wins, g.losses, g.wr, g.manual_tier
+                    db.cursor.execute(f"""
+                        SELECT p.user_id, p.game_name, p.tag_id,
+                            g.tier, g.rank, g.role, g.wins, g.losses, g.wr, g.manual_tier
                         FROM player p
                         JOIN game g ON p.user_id = g.user_id
+                        WHERE p.user_id IN ({placeholders})
                         GROUP BY p.user_id
                         HAVING MAX(g.game_date)
-                        ORDER BY 
-                            CASE 
-                                WHEN g.tier = 'challenger' THEN 1
-                                WHEN g.tier = 'grandmaster' THEN 2
-                                WHEN g.tier = 'master' THEN 3
-                                WHEN g.tier = 'diamond' THEN 4
-                                WHEN g.tier = 'emerald' THEN 5
-                                WHEN g.tier = 'platinum' THEN 6
-                                WHEN g.tier = 'gold' THEN 7
-                                WHEN g.tier = 'silver' THEN 8
-                                WHEN g.tier = 'bronze' THEN 9
-                                WHEN g.tier = 'iron' THEN 10
-                                ELSE 11
-                            END, 
-                            CASE 
-                                WHEN g.rank = 'I' THEN 1
-                                WHEN g.rank = 'II' THEN 2
-                                WHEN g.rank = 'III' THEN 3
-                                WHEN g.rank = 'IV' THEN 4
-                                ELSE 5
-                            END
-                    """)
+                    """, tuple(checked_in_ids))
 
                     player_records = db.cursor.fetchall()
 
@@ -316,19 +318,43 @@ class MatchmakingController(commands.Cog):
                                 roles = [str(role_json)]
 
                         player = {
-                            'user_id': user_id,
-                            'game_name': game_name,
-                            'tag_id': tag_id,
-                            'tier': tier.lower() if tier else 'default',
-                            'rank': rank if rank else 'V',
-                            'role': roles,
-                            'wins': wins if wins is not None else 0,
-                            'losses': losses if losses is not None else 0,
-                            'wr': float(wr) * 100 if wr is not None else 50.0,
-                            'manual_tier': manual_tier
+                            "user_id": user_id,
+                            "game_name": game_name,
+                            "tag_id": tag_id,
+                            "tier": tier.lower() if tier else "default",
+                            "rank": rank if rank else "V",
+                            "role": roles,
+                            "wins": wins if wins is not None else 0,
+                            "losses": losses if losses is not None else 0,
+                            "wr": float(wr) * 100 if wr is not None else 50.0,
+                            "manual_tier": manual_tier
                         }
 
                         all_players.append(player)
+
+                    found_ids = {str(p["user_id"]) for p in all_players}
+                    missing = [pid for pid in checked_in_ids if pid not in found_ids]
+
+                    if missing:
+                        await interaction.followup.send(
+                            "Some checked-in users are not registered in the database:\n" +
+                            "\n".join([f"- `{m}`" for m in missing])
+                        )
+                        db.close_db()
+                        return
+                    
+                    if len(checked_in_ids) < players_per_game:
+                        await interaction.followup.send(
+                            f"Need at least {players_per_game} checked-in players. Current: {len(checked_in_ids)}"
+                        )
+                        db.close_db()
+                        return
+                    
+                    total_players = len(checked_in_ids)
+                    game_count = total_players // players_per_game
+                    extra_players = total_players % players_per_game
+
+
 
                 except Exception as ex:
                     logger.error(f"Error fetching players: {ex}")
