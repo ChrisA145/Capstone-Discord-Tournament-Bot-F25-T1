@@ -1,6 +1,6 @@
 import discord
 
-'''Player detials storage from checkin or signup form
+'''Player details storage from checkin or signup form
 '''
 class FormData:
     def __init__(self):
