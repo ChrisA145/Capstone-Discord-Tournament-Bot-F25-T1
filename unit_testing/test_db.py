@@ -255,11 +255,11 @@ def test_player_toxicity_points(db_instance):
     assert initial_points == 0
     
     # Add toxicity point
-    new_points = player.add_toxicity_point(dummy.user.id)
+    new_points = player.add_toxicity_points(dummy.user.id)
     assert new_points == 1
     
     # Add again
-    newest_points = player.add_toxicity_point(dummy.user.id)
+    newest_points = player.add_toxicity_points(dummy.user.id)
     assert newest_points == 2
     
     # Verify with getter

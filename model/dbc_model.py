@@ -253,7 +253,7 @@ class Player(Tournament_DB):
                 return new_points
             return None
         except Exception as ex:
-            logger.error(f"add_toxicity_point failed with error {ex}")
+            logger.error(f"add_toxicity_points failed with error {ex}")
             return None
             
     def get_toxicity_points(self, player_id):

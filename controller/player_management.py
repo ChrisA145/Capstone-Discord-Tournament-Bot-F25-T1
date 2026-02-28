@@ -28,7 +28,7 @@ class PlayerModel:
             player_id = db.find_player_by_name(player_name)
             
             if player_id:
-                new_points = db.add_toxicity_point(player_id)
+                new_points = db.add_toxicity_points(player_id)
                 db.close_db()
                 return True
             
