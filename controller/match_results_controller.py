@@ -298,13 +298,27 @@ class MatchResultsController(commands.Cog):
             affected_ids.add(user_id)
             match_rows.append([match_id, user_id, teamUp, win, loss])
 
+        logger.info(f"[DB] settings.DATABASE_NAME = {settings.DATABASE_NAME}")
+
+        db.cursor.execute("PRAGMA database_list;")
+        logger.info(f"[DB] database_list = {db.cursor.fetchall()}")
+
+        db.cursor.execute("PRAGMA table_info(game);")
+        cols = [r[1] for r in db.cursor.fetchall()]   # <-- fetch immediately
+        logger.info(f"[DB] game columns = {cols}")
+
+        tox_col = "toxicity_points" if "toxicity_points" in cols else None
+        mvp_col = "mvp_count" if "mvp_count" in cols else None
+
+        select_tox = f"g.{tox_col}" if tox_col else "0"
+        select_mvp = f"g.{mvp_col}" if mvp_col else "0"
         # 2) Pull latest stats for affected players
         players_for_sync = []
         for pid in affected_ids:
-            db.cursor.execute("""
+            db.cursor.execute(f"""
                 SELECT p.user_id, p.game_name, p.tag_id,
                     g.tier, g.rank, g.role, g.wins, g.losses,
-                    g.manual_tier, g.toxicity_points, g.mvp_count
+                    g.manual_tier, {select_tox} as toxicity_points, {select_mvp} as mvp_count
                 FROM player p
                 JOIN game g ON p.user_id = g.user_id
                 WHERE p.user_id = ?
