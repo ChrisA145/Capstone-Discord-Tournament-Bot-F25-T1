@@ -6,6 +6,7 @@ from discord.ext import commands
 from config import settings
 from model.dbc_model import Tournament_DB, Game, Matches
 from view.team_swap_view import TeamSwapView
+from common.permissions import admin
 
 logger = settings.logging.getLogger("discord")
 
@@ -14,6 +15,7 @@ class TeamSwapController(commands.Cog):
         self.bot = bot
 
     @app_commands.command(name="swap_team_players", description="Swap players between teams in a match")
+    @admin()
     @app_commands.describe(match_id="The ID of the match to swap players in (e.g. match_1)")
     async def swap_team_players(self, interaction: discord.Interaction, match_id: str):
         """

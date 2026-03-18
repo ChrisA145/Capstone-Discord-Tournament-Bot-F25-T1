@@ -5,6 +5,7 @@ from discord.ext import commands
 import os
 from config import settings
 from model.dbc_model import Tournament_DB, Player, Player_game_info
+from common.permissions import admin
 
 # Import Google API libraries safely
 try:
@@ -98,6 +99,7 @@ class Import_Export(commands.Cog):
             defer the responce to make sure no time out error
     '''  
     @app_commands.command(name="export_players", description="Export all player information to Google Sheets")  
+    @admin()
     @app_commands.describe(custom_name="Optional custom sheet name (default: timestamp-based name)")
     async def exportToGoogleSheet(self, interaction:discord.Interaction, custom_name: str = None):
         if interaction.user.guild_permissions.administrator:
@@ -193,6 +195,7 @@ class Import_Export(commands.Cog):
             add player information to db accordingly
     '''
     @app_commands.command(name="import_players", description="Import player data from Google Sheets")
+    @admin()
     @app_commands.describe(sheet_name="Name of the sheet to import data from (default from settings)")
     async def importFromGoogleSheet(self, interaction:discord.Interaction, sheet_name: str = None):
         if interaction.user.guild_permissions.administrator:

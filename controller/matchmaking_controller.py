@@ -7,6 +7,7 @@ from discord.ext import commands
 from config import settings
 from model.dbc_model import Tournament_DB, Game
 from controller.genetic_match_making import GeneticMatchMaking
+from common.permissions import admin
 
 logger = settings.logging.getLogger("discord")
 
@@ -132,6 +133,7 @@ class MatchmakingController(commands.Cog):
             )
 
     @app_commands.command(name="simulate_volunteers", description="Simulate volunteers for sitting out")
+    @admin()
     @app_commands.describe(count="Number of volunteers needed")
     async def simulate_volunteers(self, interaction: discord.Interaction, count: int = 4):
         if interaction.user.guild_permissions.administrator:
@@ -250,15 +252,18 @@ class MatchmakingController(commands.Cog):
                                                   ephemeral=True)
 
     @app_commands.command(name="run_matchmaking", description="Run matchmaking with registered players")
+    @admin()
     @app_commands.describe(
         players_per_game="Number of players per game (default: 10)",
-        selection_method="How to select players who sit out: random, rank, or volunteer (default: random)"
-    )
+        selection_method="How to select players who sit out: random, rank, or volunteer (default: random)",
+        matchmaking_method="How to build teams: genetic or gemini (default: genetic)"
+        )
     async def run_matchmaking(
             self,
             interaction: discord.Interaction,
             players_per_game: int = 10,
-            selection_method: str = "random"
+            selection_method: str = "random",
+            matchmaking_method: str = "genetic"
     ):
         if interaction.user.guild_permissions.administrator:
             await interaction.response.defer(thinking=True)
@@ -276,7 +281,7 @@ class MatchmakingController(commands.Cog):
                 await interaction.followup.send("No active check-in session. Start one with /checkin_game.")
                 return
 
-            checked_in_ids = [(x) for x in view.checked_in_users]
+            checked_in_ids = [str(x) for x in view.checked_in_users]
 
             if len(checked_in_ids) < players_per_game:
                 await interaction.followup.send(
@@ -294,7 +299,7 @@ class MatchmakingController(commands.Cog):
                     # Get all players with game data
                     db.cursor.execute(f"""
                         SELECT p.user_id, p.game_name, p.tag_id,
-                            g.tier, g.rank, g.role, g.wins, g.losses, g.wr, g.manual_tier
+                            g.tier, g.rank, g.role, g.wins, g.losses, g.manual_tier
                         FROM player p
                         JOIN game g ON p.user_id = g.user_id
                         WHERE p.user_id IN ({placeholders})
@@ -305,7 +310,9 @@ class MatchmakingController(commands.Cog):
                     player_records = db.cursor.fetchall()
 
                     for record in player_records:
-                        user_id, game_name, tag_id, tier, rank, role_json, wins, losses, wr, manual_tier = record
+                        user_id, game_name, tag_id, tier, rank, role_json, wins, losses, manual_tier = record
+                        games_played = (wins or 0) + (losses or 0)
+                        wr = round(((wins or 0) / games_played) * 100, 2) if games_played > 0 else 50.0
 
                         # Parse role preferences
                         roles = []
@@ -477,29 +484,76 @@ class MatchmakingController(commands.Cog):
 
                     # Process players with performance metrics
                     processed_players = await matchmaker.calculate_performance(pool)
+                    matchmaking_method = matchmaking_method.lower()
+                    chosen_method = matchmaking_method
 
-                    # Run matchmaking
-                    best_chromosome, best_fitness = matchmaker.genetic_algorithm(
-                        processed_players,
-                        population_size=100,
-                        generations=100,
-                        team_size=players_per_game // 2
-                    )
-
-                    if best_chromosome:
-                        team1, team2 = matchmaker.decode_chromosome(
-                            best_chromosome,
+                    # Run matchmaking algorithm based on selected method
+                    if matchmaking_method == "genetic":
+                        best_chromosome, best_fitness = matchmaker.genetic_algorithm(
                             processed_players,
+                            population_size=100,
+                            generations=100,
                             team_size=players_per_game // 2
                         )
-                    else:
-                        # Fallback: simple alternating assignment
-                        for i, player in enumerate(pool):
-                            if i % 2 == 0:
-                                team1.append(player)
-                            else:
-                                team2.append(player)
 
+                        if best_chromosome:
+                            team1, team2 = matchmaker.decode_chromosome(
+                                best_chromosome,
+                                processed_players,
+                                team_size=players_per_game // 2
+                            )
+                        else:
+                            # Fallback: simple alternating assignment
+                            for i, player in enumerate(processed_players):
+                                if i % 2 == 0:
+                                    team1.append(player)
+                                else:
+                                    team2.append(player)
+                    elif matchmaking_method == "gemini":
+                        try: 
+                            from controller.gemini_teamup import gemini_teamup, _validate_teamup_result
+                            ai_result = await gemini_teamup(processed_players)
+                            by_id = {str(p["user_id"]): p for p in processed_players}
+                        except Exception as ex: 
+                                logger.error(f"Gemini matchmaking failed, falling back to genetic: {ex}")
+                                best_chromosome, best_fitness = matchmaker.genetic_algorithm(
+                                    processed_players,
+                                    population_size=100,
+                                    generations=100,
+                                    team_size=players_per_game // 2
+                                )
+
+                                team1, team2 = matchmaker.decode_chromosome(
+                                    best_chromosome,
+                                    processed_players,
+                                    team_size=players_per_game // 2
+                                )
+
+                        for entry in ai_result["team1"]:
+                            player = by_id[str(entry["user_id"])]
+                            player["assigned_role"] = entry["assigned_role"]
+                            team1.append(player)
+
+                        for entry in ai_result["team2"]:
+                            player = by_id[str(entry["user_id"])]
+                            player["assigned_role"] = entry["assigned_role"]
+                            team2.append(player)
+
+                    else:
+                        await interaction.followup.send(
+                            f"Invalid matchmaking_method: {matchmaking_method}. Use 'genetic' or 'gemini'."
+                        )
+                        db.close_db()
+                        return
+
+                    # Compute genetic metrics first
+                    team1_perf = matchmaker.team_performance(team1)
+                    team2_perf = matchmaker.team_performance(team2)
+                    diff = abs(team1_perf - team2_perf)
+                    role_matchup_score = matchmaker.calculate_role_matchup_score(team1, team2)
+                    role_matchup_percent = round(role_matchup_score * 100)
+
+                
                     # Record match in database
                     for player in team1:
                         user_id = player.get('user_id')
@@ -513,10 +567,7 @@ class MatchmakingController(commands.Cog):
                             query = "INSERT INTO Matches(user_id, teamUp, teamId, match_num) VALUES(?, ?, ?, ?)"
                             db.cursor.execute(query, (user_id, "team2", match_id, match_num))
 
-                    # Calculate team metrics
-                    team1_perf = matchmaker.team_performance(team1)
-                    team2_perf = matchmaker.team_performance(team2)
-                    diff = abs(team1_perf - team2_perf)
+
                     
                     # Calculate role matchup score for display
                     role_matchup_score = matchmaker.calculate_role_matchup_score(team1, team2)
@@ -526,13 +577,13 @@ class MatchmakingController(commands.Cog):
                     team1_embed = discord.Embed(
                         title=f"Game {pool_idx + 1} - Team 1 (Match ID: {match_id})",
                         color=discord.Color.blue(),
-                        description=f"Game {pool_idx + 1} of {game_count}\nRole Matchup Balance: {role_matchup_percent}%"
+                        description=f"Game {pool_idx + 1} of {game_count}\nRole Matchup Balance: {role_matchup_percent}%\nMethod: {chosen_method}"
                     )
 
                     team2_embed = discord.Embed(
                         title=f"Game {pool_idx + 1} - Team 2 (Match ID: {match_id})",
                         color=discord.Color.red(),
-                        description=f"Game {pool_idx + 1} of {game_count}\nRole Matchup Balance: {role_matchup_percent}%"
+                        description=f"Game {pool_idx + 1} of {game_count}\nRole Matchup Balance: {role_matchup_percent}%\nMethod: {chosen_method}"
                     )
 
                     # Role color mapping (using League of Legends colors)

@@ -7,6 +7,8 @@ from discord.ext import commands
 from config import settings
 from model.dbc_model import Tournament_DB, Player, Game
 from controller.api import Api_Collection
+from common.permissions import admin
+
 
 logger = settings.logging.getLogger("discord")
 
@@ -44,7 +46,7 @@ class PlayerManagement(commands.Cog):
 
     @app_commands.command(name="list_players", description="List all registered players")
     async def list_players(self, interaction: discord.Interaction):
-        if interaction.user.guild_permissions.administrator:
+        
             db = Tournament_DB()
             try:
                 # Get all players from database
@@ -267,9 +269,7 @@ class PlayerManagement(commands.Cog):
                 await interaction.response.send_message(f"Error listing players: {str(ex)}")
             finally:
                 db.close_db()
-        else:
-            await interaction.response.send_message("Sorry, you don't have required permission to use this command",
-                                                  ephemeral=True)
+      
 
     @app_commands.command(name="player_match_history", description="View a player's match history")
     @app_commands.describe(player_name="The summoner name of the player to look up")
@@ -423,6 +423,7 @@ class PlayerManagement(commands.Cog):
                                                   ephemeral=True)
                                                   
     @app_commands.command(name="simulate_checkins", description="Simulate League of Legends players checking in")
+    @admin()
     @app_commands.describe(
         player_count="Number of players to simulate (default: 10)"
     )
@@ -636,6 +637,7 @@ class PlayerManagement(commands.Cog):
 
     # This will add toxicity points to the player the admin chooses
     @app_commands.command(name="toxicity", description="Add 1 point to the player's toxicity level")
+    @admin()
     @app_commands.describe(player="The player to add toxicity to")
     async def toxicity(self, interaction: discord.Interaction, player: str):
         # Check if the player is an admin and end if not

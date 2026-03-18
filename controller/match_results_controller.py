@@ -9,6 +9,7 @@ from view.match_results_view import (
     create_mvp_voting_button,
     create_multiple_mvp_voting_buttons
 )
+from common.permissions import admin
 
 logger = settings.logging.getLogger("discord")
 
@@ -19,6 +20,7 @@ class MatchResultsController(commands.Cog):
         self.bot = bot
     
     @app_commands.command(name="sheets_ping", description="Test Google Sheets connectivity")
+    @admin()
     async def sheets_ping(self, interaction):
         sheet_sync = getattr(self.bot, "sheet_sync", None)
         if not sheet_sync:
@@ -32,6 +34,7 @@ class MatchResultsController(commands.Cog):
             await interaction.response.send_message(f"❌ SheetSync ping failed: {e}", ephemeral=True)
 
     @app_commands.command(name="record_match_results", description="Record the outcomes of multiple matches")
+    @admin()
     async def record_match_results(self, interaction):
         """Command to record results for multiple matches at once"""
         if not interaction.user.guild_permissions.administrator:
@@ -116,6 +119,7 @@ class MatchResultsController(commands.Cog):
             db.close_db()
 
     @app_commands.command(name="record_match_result", description="Record the outcome of a single match")
+    @admin()
     @app_commands.describe(
         match_id="The ID of the match (from run_matchmaking command)",
         winning_team="The number of the winning team (1 or 2)"

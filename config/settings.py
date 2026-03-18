@@ -27,9 +27,9 @@ API_URL = os.getenv("API_URL")
 STOP_API_TASK = os.getenv("STOP_API_TASK")
 START_API_TASK = os.getenv("START_API_TASK")
 
-#for openAi matchmaking
-OPEN_AI_KEY = os.getenv("OPEN_AI_KEY")
-PROMPT = os.getenv("prompt")
+#for Google Gemini matchmaking
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+PROMPT = os.getenv("PROMPT")
 
 # Google Sheets and API settings for export_import
 GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID", "default_sheet_id")
