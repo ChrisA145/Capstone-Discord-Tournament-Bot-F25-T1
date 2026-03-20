@@ -5,7 +5,6 @@ from discord.ext import commands
 from config import settings
 from model.dbc_model import Tournament_DB, Player, Game, MVP_Votes
 from view.mvp_vote_view import MVPVoteView, create_mvp_results_embed
-from common.permissions import admin
 
 logger = settings.logging.getLogger("discord")
 
@@ -20,7 +19,6 @@ class MVPVotingController(commands.Cog):
         self.active_voting_sessions = {}
     
     @app_commands.command(name="start_mvp_voting", description="Start MVP voting for a match")
-    @admin()
     @app_commands.describe(match_id="The ID of the completed match to vote for")
     async def start_mvp_voting(self, interaction: discord.Interaction, match_id: str):
         """Start MVP voting for a completed match"""
@@ -190,7 +188,6 @@ class MVPVotingController(commands.Cog):
             await interaction.followup.send(f"Error starting MVP voting: {str(ex)}")
     
     @app_commands.command(name="end_mvp_voting", description="End MVP voting early for a match")
-    @admin()
     @app_commands.describe(match_id="The ID of the match to end voting for")
     async def end_mvp_voting(self, interaction: discord.Interaction, match_id: str):
         """End MVP voting early for a match"""

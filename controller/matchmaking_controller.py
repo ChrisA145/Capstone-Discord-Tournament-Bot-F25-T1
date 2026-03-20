@@ -7,7 +7,7 @@ from discord.ext import commands
 from config import settings
 from model.dbc_model import Tournament_DB, Game
 from controller.genetic_match_making import GeneticMatchMaking
-from common.permissions import admin
+from common.bracket_helper import create_4_team_bracket
 
 logger = settings.logging.getLogger("discord")
 
@@ -133,7 +133,7 @@ class MatchmakingController(commands.Cog):
             )
 
     @app_commands.command(name="simulate_volunteers", description="Simulate volunteers for sitting out")
-    @admin()
+    
     @app_commands.describe(count="Number of volunteers needed")
     async def simulate_volunteers(self, interaction: discord.Interaction, count: int = 4):
         if interaction.user.guild_permissions.administrator:
@@ -252,7 +252,6 @@ class MatchmakingController(commands.Cog):
                                                   ephemeral=True)
 
     @app_commands.command(name="run_matchmaking", description="Run matchmaking with registered players")
-    @admin()
     @app_commands.describe(
         players_per_game="Number of players per game (default: 10)",
         selection_method="How to select players who sit out: random, rank, or volunteer (default: random)",
@@ -477,7 +476,7 @@ class MatchmakingController(commands.Cog):
                     from model.dbc_model import Matches
                     matches_db = Matches(db_name=settings.DATABASE_NAME)
                     match_num = matches_db.get_next_match_id()
-                    match_id = f"match_{match_num}"
+                    match_code = f"match_{match_num}"
 
                     # Split pool into balanced teams
                     team1, team2 = [], []
@@ -543,7 +542,6 @@ class MatchmakingController(commands.Cog):
                         await interaction.followup.send(
                             f"Invalid matchmaking_method: {matchmaking_method}. Use 'genetic' or 'gemini'."
                         )
-                        db.close_db()
                         return
 
                     # Compute genetic metrics first
@@ -559,13 +557,13 @@ class MatchmakingController(commands.Cog):
                         user_id = player.get('user_id')
                         if user_id:
                             query = "INSERT INTO Matches(user_id, teamUp, teamId, match_num) VALUES(?, ?, ?, ?)"
-                            db.cursor.execute(query, (user_id, "team1", match_id, match_num))
+                            db.cursor.execute(query, (user_id, "team1", match_code, match_num))
 
                     for player in team2:
                         user_id = player.get('user_id')
                         if user_id:
                             query = "INSERT INTO Matches(user_id, teamUp, teamId, match_num) VALUES(?, ?, ?, ?)"
-                            db.cursor.execute(query, (user_id, "team2", match_id, match_num))
+                            db.cursor.execute(query, (user_id, "team2", match_code, match_num))
 
 
                     
@@ -575,13 +573,13 @@ class MatchmakingController(commands.Cog):
 
                     # Create embeds for the teams
                     team1_embed = discord.Embed(
-                        title=f"Game {pool_idx + 1} - Team 1 (Match ID: {match_id})",
+                        title=f"Game {pool_idx + 1} - Team 1 (Match ID: {match_code})",
                         color=discord.Color.blue(),
                         description=f"Game {pool_idx + 1} of {game_count}\nRole Matchup Balance: {role_matchup_percent}%\nMethod: {chosen_method}"
                     )
 
                     team2_embed = discord.Embed(
-                        title=f"Game {pool_idx + 1} - Team 2 (Match ID: {match_id})",
+                        title=f"Game {pool_idx + 1} - Team 2 (Match ID: {match_code})",
                         color=discord.Color.red(),
                         description=f"Game {pool_idx + 1} of {game_count}\nRole Matchup Balance: {role_matchup_percent}%\nMethod: {chosen_method}"
                     )
@@ -699,16 +697,16 @@ class MatchmakingController(commands.Cog):
                     # Instructions for recording match outcome
                     instructions = (
                         f"**Matchmaking - Game {pool_idx + 1} of {game_count}**\n"
-                        f"Match ID: `{match_id}`\n"
+                        f"Match ID: `{match_code}`\n"
                         f"Team Performance Difference: {diff:.2f}\n"
                         f"Role Matchup Balance: {role_matchup_percent}%\n\n"
                         f"{role_matchup_text}\n"
-                        f"To record match results, use: `/record_match_result {match_id} <winning_team>`\n"
+                        f"To record match results, use: `/record_match_result {match_code} <winning_team>`\n"
                         f"where <winning_team> is either 1 or 2."
                     )
 
                     results.append({
-                        "match_id": match_id,
+                        "match_id": match_code,
                         "pool_idx": pool_idx,
                         "embeds": [team1_embed, team2_embed],
                         "instructions": instructions
@@ -726,9 +724,7 @@ class MatchmakingController(commands.Cog):
                         if user_id:
                             query = "INSERT INTO Matches(user_id, teamUp, teamId, match_num) VALUES(?, ?, ?, ?)"
                             db.cursor.execute(query, (user_id, "participation", participation_id, participation_match_num))
-
-                # Commit all changes to database
-                db.connection.commit()
+                    db.connection.commit()
                 db.close_db()
 
                 # Send results for each game
@@ -773,5 +769,81 @@ class MatchmakingController(commands.Cog):
             await interaction.response.send_message("Sorry, you don't have required permission to use this command",
                                                   ephemeral=True)
 
+    @app_commands.command(name="create_bracket", description="Create a 4-team bracket from two existing matches")
+    @app_commands.describe(
+        match1="First match code (e.g. match_1)",
+        match2="Second match code (e.g. match_2)"
+    )
+    async def create_bracket(self, interaction: discord.Interaction, match1: str, match2: str):
+        """Manually create a 4-team bracket from two existing match codes."""
+        db = Tournament_DB()
+        try:
+            # Verify both matches exist in the Matches table
+            for match_code in [match1, match2]:
+                db.cursor.execute(
+                    "SELECT COUNT(*) FROM Matches WHERE teamId = ?",
+                    (match_code,)
+                )
+                count = db.cursor.fetchone()[0]
+                if count == 0:
+                    await interaction.response.send_message(
+                        f"❌ Match `{match_code}` not found. Make sure you ran matchmaking first.",
+                        ephemeral=True
+                    )
+                    return
+    
+            # Check a bracket doesn't already exist for these matches
+            bracket_id = f"bracket_{match1}_{match2}"
+            db.cursor.execute(
+                "SELECT bracket_id FROM Brackets WHERE bracket_id = ?",
+                (bracket_id,)
+            )
+            if db.cursor.fetchone():
+                await interaction.response.send_message(
+                    f"❌ A bracket for `{match1}` and `{match2}` already exists: `{bracket_id}`\n"
+                    f"Use `/show_bracket {bracket_id}` to view it.",
+                    ephemeral=True
+                )
+                return
+    
+            # Build the 4 team IDs
+            teams = [
+                f"{match1}_team1",
+                f"{match1}_team2",
+                f"{match2}_team1",
+                f"{match2}_team2",
+            ]
+    
+            # Create the bracket
+            result = create_4_team_bracket(db, bracket_id, teams)
+    
+            semi1 = result['matches'][0]
+            semi2 = result['matches'][1]
+            final = result['matches'][2]
+    
+            await interaction.response.send_message(
+                f"✅ Bracket **`{result['bracket_id']}`** created!\n\n"
+                f"**Seeded teams:**\n"
+                f"• `{teams[0]}` (from {match1})\n"
+                f"• `{teams[1]}` (from {match1})\n"
+                f"• `{teams[2]}` (from {match2})\n"
+                f"• `{teams[3]}` (from {match2})\n\n"
+                f"**Games to play — use these match codes:**\n"
+                f"🥊 Semifinal 1: `/record_match_result {semi1} <1 or 2>`\n"
+                f"🥊 Semifinal 2: `/record_match_result {semi2} <1 or 2>`\n"
+                f"🏆 Final:        `/record_match_result {final} <1 or 2>`  *(available after semis)*\n\n"
+                f"⚠️ **Important:** Use the match codes above (`{semi1}`, `{semi2}`, `{final}`) "
+                f"when recording results — NOT the original matchmaking codes (`{match1}`, `{match2}`).\n\n"
+                f"Use `/show_bracket {result['bracket_id']}` to view the bracket at any time."
+            )
+    
+        except Exception as ex:
+            logger.error(f"create_bracket failed: {ex}")
+            await interaction.response.send_message(
+                f"❌ Failed to create bracket: {str(ex)}", ephemeral=True
+            )
+        finally:
+            db.close_db()
+            
 async def setup(bot):
     await bot.add_cog(MatchmakingController(bot))

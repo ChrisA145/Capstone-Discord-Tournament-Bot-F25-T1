@@ -62,10 +62,11 @@ async def main():
     Game.createTable(db)
     
     # Import and create Matches, MVP_Votes, and Player_game_info tables
-    from model.dbc_model import Matches, MVP_Votes, Player_game_info
-    Matches.createTable(db)
+    from model.dbc_model import Matches, MVP_Votes, Player_game_info, Brackets, BracketMatches
     MVP_Votes.createTable(db)
     Player_game_info.createTable(db)
+    Brackets.createTable(db)
+    BracketMatches.createTable(db)
     
     # Add a command error handler for app commands
     @sys_client.tree.error

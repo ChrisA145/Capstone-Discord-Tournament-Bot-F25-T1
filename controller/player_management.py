@@ -7,7 +7,6 @@ from discord.ext import commands
 from config import settings
 from model.dbc_model import Tournament_DB, Player, Game
 from controller.api import Api_Collection
-from common.permissions import admin
 
 
 logger = settings.logging.getLogger("discord")
@@ -274,7 +273,6 @@ class PlayerManagement(commands.Cog):
     @app_commands.command(name="player_match_history", description="View a player's match history")
     @app_commands.describe(player_name="The summoner name of the player to look up")
     async def player_match_history(self, interaction: discord.Interaction, player_name: str):
-        if interaction.user.guild_permissions.administrator:
             db = Tournament_DB()
             try:
                 # Find player ID from name
@@ -418,12 +416,9 @@ class PlayerManagement(commands.Cog):
                 await interaction.response.send_message(f"Error retrieving player history: {str(ex)}")
             finally:
                 db.close_db()
-        else:
-            await interaction.response.send_message("Sorry, you don't have required permission to use this command",
-                                                  ephemeral=True)
+       
                                                   
     @app_commands.command(name="simulate_checkins", description="Simulate League of Legends players checking in")
-    @admin()
     @app_commands.describe(
         player_count="Number of players to simulate (default: 10)"
     )
@@ -637,7 +632,6 @@ class PlayerManagement(commands.Cog):
 
     # This will add toxicity points to the player the admin chooses
     @app_commands.command(name="toxicity", description="Add 1 point to the player's toxicity level")
-    @admin()
     @app_commands.describe(player="The player to add toxicity to")
     async def toxicity(self, interaction: discord.Interaction, player: str):
         # Check if the player is an admin and end if not

@@ -836,4 +836,56 @@ class MVP_Votes(Tournament_DB):
         except Exception as ex:
             logger.error(f"finalize_mvp_voting failed with error {ex}")
             return None
+class Brackets(Tournament_DB):
 
+    def createTable(self):
+        bracket_table_query = """
+            CREATE TABLE IF NOT EXISTS Brackets (
+            bracket_id text PRIMARY KEY,
+            bracket_type text NOT NULL DEFAULT 'single_elimination',
+            total_teams integer NOT NULL,
+            status text NOT NULL DEFAULT 'active',
+            created_at text DEFAULT (datetime('now'))
+        )
+        """
+        self.cursor.execute(bracket_table_query)
+        self.connection.commit()
+
+
+class BracketMatches(Tournament_DB):
+
+    def createTable(self):
+        bracket_matches_query = """
+            CREATE TABLE IF NOT EXISTS BracketMatches (
+            bracket_match_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            bracket_id text NOT NULL,
+            round_num integer NOT NULL,
+            match_index integer NOT NULL,
+
+            match_code text UNIQUE NOT NULL,
+
+            seed_a integer,
+            seed_b integer,
+
+            teamA_id text,
+            teamB_id text,
+
+            winner_team_id text,
+            loser_team_id text,
+
+            status text NOT NULL DEFAULT 'pending',
+
+            next_match_code text,
+            next_slot text CHECK(next_slot IN ('A', 'B')),
+
+            created_at text DEFAULT (datetime('now')),
+
+            FOREIGN KEY (bracket_id) REFERENCES Brackets (bracket_id) ON DELETE CASCADE
+        )
+        """
+        self.cursor.execute(bracket_matches_query)
+        self.cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_bracket_match_code
+            ON BracketMatches(match_code)
+        """)
+        self.connection.commit()

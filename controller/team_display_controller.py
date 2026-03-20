@@ -7,7 +7,6 @@ from discord.ext import commands
 from config import settings
 from model.dbc_model import Tournament_DB
 from view.team_announcement_image import create_team_matchup_image
-from common.permissions import admin
 
 logger = settings.logging.getLogger("discord")
 
@@ -574,7 +573,6 @@ class TeamDisplayController(commands.Cog):
             await interaction.followup.send(f"Error displaying teams: {str(ex)}")
             
     @app_commands.command(name="announce_teams", description="Announce teams to a channel using a dropdown")
-    @admin()
     @app_commands.describe(
         channel="The channel to announce to (defaults to tournament announcement channel)",
         format="Announcement format: 'image' (default), 'text', or 'both'"

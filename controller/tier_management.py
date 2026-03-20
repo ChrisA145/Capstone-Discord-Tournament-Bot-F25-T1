@@ -4,7 +4,6 @@ from discord import app_commands
 from discord.ext import commands
 from config import settings
 from model.dbc_model import Tournament_DB, Game
-from common.permissions import admin
 
 logger = settings.logging.getLogger("discord")
 
@@ -15,7 +14,6 @@ class TierManagement(commands.Cog):
     @app_commands.command(name="view_player_tier", description="View a player's manual tier value")
     @app_commands.describe(player_name="The summoner name of the player to look up")
     async def view_player_tier(self, interaction: discord.Interaction, player_name: str):
-        if interaction.user.guild_permissions.administrator:
             db = Tournament_DB()
             game_db = Game(db_name=settings.DATABASE_NAME)
             
@@ -100,12 +98,9 @@ class TierManagement(commands.Cog):
             finally:
                 db.close_db()
                 game_db.close_db()
-        else:
-            await interaction.response.send_message("Sorry, you don't have required permission to use this command",
-                                                  ephemeral=True)
+        
     
     @app_commands.command(name="adjust_player_tier", description="Manually adjust a player's tier value")
-    @admin()
     @app_commands.describe(
         player_name="The summoner name of the player to adjust",
         new_tier_value="New manual tier value (0-10)",
@@ -203,7 +198,6 @@ class TierManagement(commands.Cog):
                                                   ephemeral=True)
 
     @app_commands.command(name="reset_player_tier", description="Reset a player's manual tier to the default calculated value")
-    @admin()
     @app_commands.describe(player_name="The summoner name of the player to reset")
     async def reset_player_tier(self, interaction: discord.Interaction, player_name: str):
         if interaction.user.guild_permissions.administrator:

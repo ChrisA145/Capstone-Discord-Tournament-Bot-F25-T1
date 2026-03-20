@@ -2,6 +2,8 @@ import discord
 import asyncio
 from discord import app_commands
 from discord.ext import commands
+from view.bracket_image import create_bracket_image
+from common.bracket_helper import resolve_bracket_team
 from config import settings
 from model.dbc_model import Tournament_DB, Player, Game
 from view.match_results_view import (
@@ -9,7 +11,7 @@ from view.match_results_view import (
     create_mvp_voting_button,
     create_multiple_mvp_voting_buttons
 )
-from common.permissions import admin
+
 
 logger = settings.logging.getLogger("discord")
 
@@ -20,22 +22,26 @@ class MatchResultsController(commands.Cog):
         self.bot = bot
     
     @app_commands.command(name="sheets_ping", description="Test Google Sheets connectivity")
-    @admin()
     async def sheets_ping(self, interaction):
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message(
+                "You must be an Admin to use this command.",
+                ephemeral=True
+            )
+            return
+        
         sheet_sync = getattr(self.bot, "sheet_sync", None)
         if not sheet_sync:
             await interaction.response.send_message("❌ SheetSync is not initialized.", ephemeral=True)
             return
         try:
-            # you can implement a simple method in SheetSync like `ping()`
             await asyncio.to_thread(sheet_sync.ping)
             await interaction.response.send_message("✅ SheetSync ping successful.", ephemeral=True)
         except Exception as e:
             await interaction.response.send_message(f"❌ SheetSync ping failed: {e}", ephemeral=True)
 
-    @app_commands.command(name="record_match_results", description="Record the outcomes of multiple matches")
-    @admin()
-    async def record_match_results(self, interaction):
+    @app_commands.command(name="record_multiple_match_results", description="Record the outcomes of multiple matches")
+    async def record_multiple_match_results(self, interaction):
         """Command to record results for multiple matches at once"""
         if not interaction.user.guild_permissions.administrator:
             await interaction.response.send_message(
@@ -90,27 +96,51 @@ class MatchResultsController(commands.Cog):
             await view.wait()
 
             # Process the results
-            results_processed = self._process_match_results(db, view.processed_results)
+            players_updated, _ = self._process_match_results(db, view.processed_results)
+            results_processed = len(view.processed_results)
+
+            # Collect bracket announcements as we process each match
+            bracket_announcements = []
+
+            for mid, winning_team in view.processed_results.items():
+                bracket_result = self._advance_bracket_after_result(db, mid, winning_team)
+
+                if bracket_result:
+                    if bracket_result["completed_bracket"]:
+                        winner_players = resolve_bracket_team(db, bracket_result["advanced_team_id"])
+                        mentions = " ".join(f"<@{p['user_id']}>" for p in winner_players)
+                        bracket_announcements.append(f"🏆 Tournament complete! Winning team: {mentions}")
+                    else:
+                        bracket_announcements.append(
+                            f"✅ `{bracket_result['advanced_team_id']}` advances to "
+                            f"`{bracket_result['next_match_code']}`!"
+                        )
+
             for mid in view.processed_results.keys():
                 await self._sync_match_to_sheets(db, mid)
 
             # Send final confirmation
             if results_processed > 0:
-                # Create view with buttons to start MVP voting
+
                 def create_callback(mid):
                     async def callback(inter):
                         await self._start_mvp_voting(inter, mid)
                     return callback
-                
+
                 mvp_view = create_multiple_mvp_voting_buttons(
                     view.processed_results.keys(),
                     create_callback
                 )
-                
+
                 await interaction.followup.send(
-                    f"Successfully recorded results for {results_processed} matches and updated player stats. Would you like to start MVP voting?",
+                    f"Successfully recorded results for {results_processed} matches "
+                    f"and updated player stats. Would you like to start MVP voting?",
                     view=mvp_view
                 )
+
+                # Send bracket announcements after the main confirmation
+                for announcement in bracket_announcements:
+                    await interaction.followup.send(announcement)
 
         except Exception as ex:
             logger.error(f"Error recording match results: {ex}")
@@ -119,7 +149,7 @@ class MatchResultsController(commands.Cog):
             db.close_db()
 
     @app_commands.command(name="record_match_result", description="Record the outcome of a single match")
-    @admin()
+  
     @app_commands.describe(
         match_id="The ID of the match (from run_matchmaking command)",
         winning_team="The number of the winning team (1 or 2)"
@@ -139,13 +169,20 @@ class MatchResultsController(commands.Cog):
 
         db = Tournament_DB()
         try:
-            # Verify the match exists
             db.cursor.execute("SELECT COUNT(*) FROM Matches WHERE teamId = ?", (match_id,))
             count = db.cursor.fetchone()[0]
 
+            # Also check BracketMatches in case it's a bracket round match code
             if count == 0:
-                await interaction.response.send_message(f"Match ID {match_id} not found", ephemeral=True)
-                return
+                db.cursor.execute("SELECT COUNT(*) FROM BracketMatches WHERE match_code = ?", (match_id,))
+                bracket_count = db.cursor.fetchone()[0]
+                
+                if bracket_count == 0:
+                    await interaction.response.send_message(
+                        f"❌ Match ID `{match_id}` not found in Matches or BracketMatches.",
+                        ephemeral=True
+                    )
+                    return
 
             # Process the match result
             results = {match_id: winning_team}
@@ -166,6 +203,16 @@ class MatchResultsController(commands.Cog):
                 f"Updated stats for {players_updated} players.",
                 view=mvp_view
             )
+            bracket_result = self._advance_bracket_after_result(db, match_id, winning_team)
+
+            if bracket_result:
+                if bracket_result["completed_bracket"]:
+                    winner_players = resolve_bracket_team(db, bracket_result["advanced_team_id"])
+                    mentions = " ".join(f"<@{p['user_id']}>" for p in winner_players)
+                    await interaction.followup.send(f"🏆 Tournament complete! Winning team: {mentions}")
+                else:
+                    await interaction.followup.send(
+                        f"✅ `{bracket_result['advanced_team_id']}` advances to `{bracket_result['next_match_code']}`!")
 
         except Exception as ex:
             logger.error(f"Error recording match result: {ex}")
@@ -280,6 +327,103 @@ class MatchResultsController(commands.Cog):
         
         return players_updated, affected_player_ids
 
+
+    def _advance_bracket_after_result(self, db, match_code: str, winning_team: int):
+        """
+        match_code example: 'match_1'
+        winning_team:
+            1 -> teamA_id wins
+            2 -> teamB_id wins
+        """
+
+        try:
+            db.cursor.execute("""
+                SELECT bracket_id, teamA_id, teamB_id, next_match_code, next_slot, status
+                FROM BracketMatches
+                WHERE match_code = ?
+            """, (match_code,))
+            row = db.cursor.fetchone()
+
+            if not row:
+                return None  # not a bracket match
+
+            bracket_id, teamA_id, teamB_id, next_match_code, next_slot, status = row
+
+            if not teamA_id or not teamB_id:
+                logger.error(f"Bracket match {match_code} is incomplete (missing teams)")
+                return None
+            if status == "completed":
+                return None
+
+            if winning_team == 1:
+                winner_team_id = teamA_id
+                loser_team_id = teamB_id
+            elif winning_team == 2:
+                winner_team_id = teamB_id
+                loser_team_id = teamA_id
+            else:
+                raise ValueError("winning_team must be 1 or 2")
+
+            db.cursor.execute("""
+                UPDATE BracketMatches
+                SET winner_team_id = ?, loser_team_id = ?, status = 'completed'
+                WHERE match_code = ?
+            """, (winner_team_id, loser_team_id, match_code))
+
+            # Championship match
+            if not next_match_code:
+                db.cursor.execute("""
+                    UPDATE Brackets
+                    SET status = 'complete'
+                    WHERE bracket_id = ?
+                """, (bracket_id,))
+                db.connection.commit()
+                return {
+                    "advanced_team_id": winner_team_id,
+                    "next_match_code": None,
+                    "completed_bracket": True
+                }
+
+            # Advance winner to next bracket match
+            if next_slot == "A":
+                db.cursor.execute("""
+                    UPDATE BracketMatches
+                    SET teamA_id = ?
+                    WHERE match_code = ?
+                """, (winner_team_id, next_match_code))
+            elif next_slot == "B":
+                db.cursor.execute("""
+                    UPDATE BracketMatches
+                    SET teamB_id = ?
+                    WHERE match_code = ?
+                """, (winner_team_id, next_match_code))
+
+            db.cursor.execute("""
+                SELECT teamA_id, teamB_id
+                FROM BracketMatches
+                WHERE match_code = ?
+            """, (next_match_code,))
+            next_row = db.cursor.fetchone()
+
+            if next_row and next_row[0] and next_row[1]:
+                db.cursor.execute("""
+                    UPDATE BracketMatches
+                    SET status = 'ready'
+                    WHERE match_code = ?
+                """, (next_match_code,))
+
+            db.connection.commit()
+
+            return {
+                "advanced_team_id": winner_team_id,
+                "next_match_code": next_match_code,
+                "completed_bracket": False
+            }
+
+        except Exception as ex:
+            logger.error(f"_advance_bracket_after_result failed with error {ex}")
+            return None
+    
     async def _sync_match_to_sheets(self, db: Tournament_DB, match_id: str):
         sheet_sync = getattr(self.bot, "sheet_sync", None)
         if not sheet_sync:
@@ -386,6 +530,75 @@ class MatchResultsController(commands.Cog):
                 ephemeral=True
             )
 
+    @app_commands.command(name="show_bracket", description="Display the current state of a bracket")
+    
+    @app_commands.describe(bracket_id="The bracket ID to display (e.g. bracket_1)")
+    async def show_bracket(self, interaction, bracket_id: str):
+        """Generate and post a bracket image for the given bracket_id."""
+        await interaction.response.defer()          # image generation can take a moment
+
+        db = Tournament_DB()
+        try:
+            # Verify the bracket exists
+            db.cursor.execute(
+                "SELECT status, total_teams FROM Brackets WHERE bracket_id = ?",
+                (bracket_id,)
+            )
+            row = db.cursor.fetchone()
+
+            if not row:
+                await interaction.followup.send(
+                    f"❌ Bracket `{bracket_id}` not found.", ephemeral=True
+                )
+                return
+
+            status, total_teams = row
+
+        finally:
+            db.close_db()
+
+        def generate():
+            thread_db = Tournament_DB()
+            try:
+                return create_bracket_image(bracket_id, thread_db)
+            finally:
+                thread_db.close_db()
+
+        try:
+            img_path = await asyncio.to_thread(generate)
+
+            # Build embed
+            status_emoji = {
+                "active":   "🟢",
+                "complete": "🏆",
+                "pending":  "🕐",
+            }.get(status, "⚪")
+
+            embed = discord.Embed(
+                title=f"📊  Bracket — {bracket_id}",
+                description=f"{status_emoji} Status: **{status.upper()}**  ·  Teams: **{total_teams}**",
+                color=discord.Color.gold() if status == "complete" else discord.Color.blue(),
+            )
+            embed.set_footer(text=f"Bracket ID: {bracket_id}")
+
+            # Attach image
+            file = discord.File(img_path, filename=f"bracket_{bracket_id}.png")
+            embed.set_image(url=f"attachment://bracket_{bracket_id}.png")
+
+            await interaction.followup.send(embed=embed, file=file)
+
+        except ValueError as ve:
+            await interaction.followup.send(f"❌ {ve}", ephemeral=True)
+        except Exception as ex:
+            import logging
+            logging.getLogger("discord").error(f"show_bracket failed: {ex}")
+            await interaction.followup.send(
+                f"❌ Failed to generate bracket image: {str(ex)}", ephemeral=True
+            )
+        finally:
+            db.close_db()
+
+    
 
 async def setup(bot):
     await bot.add_cog(MatchResultsController(bot))

@@ -20,7 +20,6 @@ class CheckinController(commands.Cog):
         return self.active_checkins.get(guild_id)
     
     @app_commands.command(name="checkin_game", description="Start check-in for the next game")
-   
     @app_commands.describe(timeout="Check-in duration in seconds (default: 900 seconds/15 minutes)")
     async def checkin(self, interaction: discord.Interaction, timeout: int = 900):
         if not interaction.user.guild_permissions.administrator:

@@ -5,7 +5,7 @@ from discord.ext import commands
 import os
 from config import settings
 from model.dbc_model import Tournament_DB, Player, Player_game_info
-from common.permissions import admin
+
 
 # Import Google API libraries safely
 try:
@@ -99,7 +99,7 @@ class Import_Export(commands.Cog):
             defer the responce to make sure no time out error
     '''  
     @app_commands.command(name="export_players", description="Export all player information to Google Sheets")  
-    @admin()
+    
     @app_commands.describe(custom_name="Optional custom sheet name (default: timestamp-based name)")
     async def exportToGoogleSheet(self, interaction:discord.Interaction, custom_name: str = None):
         if interaction.user.guild_permissions.administrator:
@@ -186,138 +186,139 @@ class Import_Export(commands.Cog):
             )
 
 
+@app_commands.command(name="import_players", description="Import player data from Google Sheets")
+@app_commands.describe(sheet_name="Name of the sheet to import data from (default from settings)")
+async def importFromGoogleSheet(self, interaction: discord.Interaction, sheet_name: str = None):
 
-    '''Method to import playeres data from googlesheet to db
-        Steps:
-            pass a sheet_name with the command or configure in .env, else it takes a defult name one 'sheet'
-            get the headere and row data from sheet_name
-            get colums name from 'playerGameDetail' table
-            add player information to db accordingly
-    '''
-    @app_commands.command(name="import_players", description="Import player data from Google Sheets")
-    @admin()
-    @app_commands.describe(sheet_name="Name of the sheet to import data from (default from settings)")
-    async def importFromGoogleSheet(self, interaction:discord.Interaction, sheet_name: str = None):
-        if interaction.user.guild_permissions.administrator:
-            # Check if Google APIs are available
-            if not self.google_apis_enabled:
-                await interaction.response.send_message(
-                    "⚠️ Google Sheets API is not properly configured. Please check server logs for details.",
-                    ephemeral=True
-                )
-                return
-                
-            # Use provided sheet_name or default from settings
-            if not sheet_name:
-                sheet_name = settings.CELL_RANGE
-                
-            try:
-                await interaction.response.defer()
-                
-                # Fetch data from Google Sheet
-                try:
-                    sheet_data = self.spreadsheets_service.values().get(
-                        spreadsheetId=self.googleSheetId, range=sheet_name
-                    ).execute()
-                    
-                    values = sheet_data.get("values", [])
-                    if not values:
-                        await interaction.followup.send(
-                            f"❌ No data found in the Google Sheet: {sheet_name}",
-                            ephemeral=True
-                        )
-                        return
-                        
-                except Exception as sheet_error:
-                    logger.error(f"Error fetching sheet data: {sheet_error}")
-                    await interaction.followup.send(
-                        f"❌ Error fetching data from Google Sheet: {str(sheet_error)}",
-                        ephemeral=True
-                    )
-                    return
+    # ❌ Not admin
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message(
+            "Sorry, you don't have administrator permissions to use this command.",
+            ephemeral=True
+        )
+        return
 
-                # Process headers and rows
-                headers = [header.strip() for header in values[0]]
-                rows = values[1:]
-                db = Tournament_DB()
-                
-                records_updated = 0
-                records_created = 0
+    # ❌ Google API not ready
+    if not self.google_apis_enabled:
+        await interaction.response.send_message(
+            "⚠️ Google Sheets API is not properly configured.",
+            ephemeral=True
+        )
+        return
 
-                # Get table columns for both tables
-                table_columns = Player_game_info.metadata(db)
-                table_columns = {row[1]: row[1] for row in table_columns}  
-                valid_columns = [col for col in headers if col in table_columns]
+    # ✅ Default sheet
+    if not sheet_name:
+        sheet_name = settings.CELL_RANGE   # e.g. "Sheet1"
 
-                player_columns = Player.metadata(db)
-                p_table_columns = {row[1]: row[1] for row in player_columns}
-                p_valid_columns = [col for col in headers if col in p_table_columns]
-                
-                # Process each row
-                for row in rows:
-                    # If row is shorter than headers, extend it with None values
-                    if len(row) < len(headers):
-                        row = row + [None] * (len(headers) - len(row))
-                        
-                    # Convert row into {header: value} format
-                    row_data = dict(zip(headers, row))
-                    
-                    values_to_insert = [row_data.get(col, None) for col in valid_columns]
-                    p_values_to_insert = [row_data.get(col, None) for col in p_valid_columns]
+    try:
+        await interaction.response.defer()
 
-                    if "player_id" in row_data:
-                        # Update player table first
-                        sql_query = f"""
-                            INSERT INTO player ({', '.join(p_valid_columns)}) 
-                            VALUES ({', '.join(['?' for _ in p_valid_columns])}) 
-                            ON CONFLICT(player_id) DO UPDATE SET 
-                            {', '.join([f"{col} = EXCLUDED.{col}" for col in p_valid_columns if col != 'player_id'])};
-                        """
-                        result = Player.generalplayerQuery(db, sql_query, p_values_to_insert)
-                        
-                        # Then update playerGameDetail table
-                        column_names = ', '.join(valid_columns)
-                        placeholders = ', '.join(['?' for _ in valid_columns])
-                        query = "SELECT COUNT(*) FROM playerGameDetail WHERE player_id = ?"
-                        query_params = (row_data["player_id"],)
+        # ===== GET DATA FROM GOOGLE SHEET =====
+        sheet_data = self.spreadsheets_service.values().get(
+            spreadsheetId=self.googleSheetId,
+            range=sheet_name   # ✅ FIXED (no A1:Z)
+        ).execute()
 
-                        isExistPlayerId = Player_game_info.isExistPlayerId(db, query=query, query_param=query_params)
-
-                        if isExistPlayerId:
-                            update_query = f"""
-                                UPDATE playerGameDetail
-                                SET {', '.join([f"{col} = ?" for col in valid_columns if col != 'player_id'])}
-                                WHERE player_id = ?;
-                            """
-                            Player_game_info.importToDb(db, update_query, [row_data.get(col, None) for col in valid_columns if col != 'player_id'] + [row_data["player_id"]])
-                            records_updated += 1
-                        else:
-                            insert_query = f"""
-                                INSERT INTO playerGameDetail ({column_names}) 
-                                VALUES ({placeholders});
-                            """
-                            Player_game_info.importToDb(db, insert_query, [row_data.get(col, None) for col in valid_columns])
-                            records_created += 1
-
-                db.close_db()
-                
-                # Success message with stats
-                await interaction.followup.send(
-                    f"✅ Import completed successfully!\n\n**Sheet:** {sheet_name}\n**Records processed:** {len(rows)}\n**Records created:** {records_created}\n**Records updated:** {records_updated}"
-                )
-                
-            except Exception as ex:
-                logger.error(f"Import error: {ex}")
-                await interaction.followup.send(
-                    f"❌ Error importing data: {str(ex)}",
-                    ephemeral=True
-                )
-        else:
-            await interaction.response.send_message(
-                "Sorry, you don't have administrator permissions to use this command.",
+        values = sheet_data.get("values", [])
+        if not values:
+            await interaction.followup.send(
+                f"❌ No data found in the Google Sheet: {sheet_name}",
                 ephemeral=True
             )
-        
+            return
 
+        # ===== PROCESS DATA =====
+        headers = [header.strip() for header in values[0]]
+        rows = values[1:]
+
+        db = Tournament_DB()
+        records_updated = 0
+        records_created = 0
+
+        # Get valid columns
+        table_columns = {row[1]: row[1] for row in Player_game_info.metadata(db)}
+        valid_columns = [col for col in headers if col in table_columns]
+
+        player_columns = {row[1]: row[1] for row in Player.metadata(db)}
+        p_valid_columns = [col for col in headers if col in player_columns]
+
+        # ===== LOOP ROWS =====
+        for row in rows:
+
+            if len(row) < len(headers):
+                row += [None] * (len(headers) - len(row))
+
+            row_data = dict(zip(headers, row))
+
+            if "player_id" in row_data:
+
+                # ===== PLAYER TABLE =====
+                sql_query = f"""
+                INSERT INTO player ({', '.join(p_valid_columns)})
+                VALUES ({', '.join(['?' for _ in p_valid_columns])})
+                ON CONFLICT(player_id) DO UPDATE SET
+                {', '.join([f"{col} = EXCLUDED.{col}" for col in p_valid_columns if col != 'player_id'])};
+                """
+
+                Player.generalplayerQuery(
+                    db,
+                    sql_query,
+                    [row_data.get(col) for col in p_valid_columns]
+                )
+
+                # ===== GAME TABLE =====
+                exists = Player_game_info.isExistPlayerId(
+                    db,
+                    query="SELECT COUNT(*) FROM playerGameDetail WHERE player_id = ?",
+                    query_param=(row_data["player_id"],)
+                )
+
+                if exists:
+                    update_query = f"""
+                    UPDATE playerGameDetail
+                    SET {', '.join([f"{col} = ?" for col in valid_columns if col != 'player_id'])}
+                    WHERE player_id = ?;
+                    """
+
+                    Player_game_info.importToDb(
+                        db,
+                        update_query,
+                        [row_data.get(col) for col in valid_columns if col != 'player_id']
+                        + [row_data["player_id"]]
+                    )
+
+                    records_updated += 1
+
+                else:
+                    insert_query = f"""
+                    INSERT INTO playerGameDetail ({', '.join(valid_columns)})
+                    VALUES ({', '.join(['?' for _ in valid_columns])});
+                    """
+
+                    Player_game_info.importToDb(
+                        db,
+                        insert_query,
+                        [row_data.get(col) for col in valid_columns]
+                    )
+
+                    records_created += 1
+
+        db.close_db()
+
+        # ===== SUCCESS =====
+        await interaction.followup.send(
+            f"✅ Import completed successfully!\n\n"
+            f"Sheet: {sheet_name}\n"
+            f"Processed: {len(rows)}\n"
+            f"Created: {records_created}\n"
+            f"Updated: {records_updated}"
+        )
+
+    except Exception as ex:
+        logger.error(f"Import error: {ex}")
+        await interaction.followup.send(
+            f"❌ Error importing data: {str(ex)}",
+            ephemeral=True
+        )
 async def setup(bot):
     await bot.add_cog(Import_Export(bot))
