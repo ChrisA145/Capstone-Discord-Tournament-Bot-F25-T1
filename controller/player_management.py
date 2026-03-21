@@ -419,9 +419,7 @@ class PlayerManagement(commands.Cog):
        
                                                   
     @app_commands.command(name="simulate_checkins", description="Simulate League of Legends players checking in")
-    @app_commands.describe(
-        player_count="Number of players to simulate (default: 10)"
-    )
+    @app_commands.describe(player_count="Number of players to simulate (default: 10)")
     async def simulate_checkins(self, interaction: discord.Interaction, player_count: int = 10):
         if interaction.user.guild_permissions.administrator:
             await interaction.response.defer(thinking=True)

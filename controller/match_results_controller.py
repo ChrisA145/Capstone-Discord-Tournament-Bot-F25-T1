@@ -15,6 +15,332 @@ from view.match_results_view import (
 
 logger = settings.logging.getLogger("discord")
 
+class BracketResultView(discord.ui.View):
+    """
+    Interactive bracket result recording view.
+    Shows buttons for each semifinal, then winner selection,
+    then auto-posts updated bracket image.
+    """
+ 
+    def __init__(self, bot, bracket_id: str, matches: list[str], bracket_id_for_image: str):
+        """
+        Args:
+            bot: the Discord bot instance (needed to call _process_match_results etc.)
+            bracket_id: e.g. "bracket_match_1_match_2"
+            matches: [semi1_code, semi2_code, final_code]
+            bracket_id_for_image: same as bracket_id, used for show_bracket
+        """
+        super().__init__(timeout=3600)  # 1 hour timeout
+        self.bot = bot
+        self.bracket_id = bracket_id
+        self.matches = matches  # [semi1, semi2, final]
+        self.bracket_id_for_image = bracket_id_for_image
+        self.recorded = set()  # track which match codes have been recorded
+        self.message = None  # will hold the original message reference after sending
+
+        self._build_buttons()
+ 
+    def _build_buttons(self):
+        self.clear_items()
+
+        # Check DB for actual recorded status — don't rely on in-memory set
+        db = Tournament_DB()
+        try:
+            completed = set()
+            for mc in self.matches:
+                db.cursor.execute(
+                    "SELECT status FROM BracketMatches WHERE match_code = ?",
+                    (mc,)
+                )
+                row = db.cursor.fetchone()
+                if row and row[0] == "completed":
+                    completed.add(mc)
+        finally:
+            db.close_db()
+
+        # Sync in-memory recorded set with DB
+        self.recorded = completed
+
+        labels = ["🥊 Semifinal 1", "🥊 Semifinal 2", "🏆 Final"]
+        both_semis_done = all(self.matches[j] in completed for j in range(2))
+
+        for i, match_code in enumerate(self.matches):
+            is_final = i == 2
+            already_done = match_code in completed
+            disabled = (is_final and not both_semis_done) or already_done
+
+            label = labels[i]
+            if already_done:
+                label += " ✅"
+
+            btn = discord.ui.Button(
+                label=label,
+                style=discord.ButtonStyle.success if already_done
+                    else discord.ButtonStyle.primary,
+                custom_id=f"bracket_pick_{match_code}",
+                disabled=disabled,
+                row=0
+            )
+            btn.callback = self._make_pick_callback(match_code, i)
+            self.add_item(btn)
+ 
+    def _make_pick_callback(self, match_code: str, match_idx: int):
+        """Returns a callback that shows the winner selection for this match."""
+        async def callback(interaction: discord.Interaction):
+            # Admin check
+            if not interaction.user.guild_permissions.administrator:
+                await interaction.response.send_message(
+                    "❌ Only admins can record bracket results.", ephemeral=True
+                )
+                return
+ 
+            if match_code in self.recorded:
+                await interaction.response.send_message(
+                    f"❌ Result for `{match_code}` already recorded.", ephemeral=True
+                )
+                return
+ 
+            # Fetch team names for this bracket match
+            db = Tournament_DB()
+            try:
+                db.cursor.execute(
+                    "SELECT teamA_id, teamB_id FROM BracketMatches WHERE match_code = ?",
+                    (match_code,)
+                )
+                row = db.cursor.fetchone()
+                team_a = row[0] if row else "Team 1"
+                team_b = row[1] if row else "Team 2"
+            finally:
+                db.close_db()
+ 
+            # Show winner selection as ephemeral message
+            winner_view = BracketWinnerView(
+                bot=self.bot,
+                parent_view=self,
+                match_code=match_code,
+                team_a=team_a,
+                team_b=team_b,
+                bracket_id=self.bracket_id,
+            )
+ 
+            round_labels = ["Semifinal 1", "Semifinal 2", "Final"]
+            await interaction.response.send_message(
+                f"**{round_labels[match_idx]}** (`{match_code}`)\nWho won?",
+                view=winner_view,
+                ephemeral=True
+            )
+ 
+        return callback
+ 
+    async def refresh(self, interaction: discord.Interaction):
+        """Rebuild buttons and edit the original message."""
+        self._build_buttons()
+        try:
+            if self.message:
+                await self.message.edit(
+                    content=self._status_text(),
+                    view=self
+                )
+            else: await interaction.message.edit(
+                content=self._status_text(),
+                view=self
+            )
+
+        except Exception as e:
+            logger.error(f"BracketResultView.refresh failed: {e}")
+ 
+    def _status_text(self) -> str:
+        lines = [f"📋 **Bracket `{self.bracket_id}`** — Record Results:"]
+        labels = ["Semifinal 1", "Semifinal 2", "Final"]
+        for i, mc in enumerate(self.matches):
+            status = "✅ Done" if mc in self.recorded else "⏳ Pending"
+            lines.append(f"{labels[i]}: `{mc}` — {status}")
+        return "\n".join(lines)
+ 
+ 
+class BracketWinnerView(discord.ui.View):
+    """Ephemeral view shown after clicking a semifinal/final button."""
+ 
+    def __init__(self, bot, parent_view: BracketResultView,
+                 match_code: str, team_a: str, team_b: str, bracket_id: str):
+        super().__init__(timeout=300)
+        self.bot = bot
+        self.parent_view = parent_view
+        self.match_code = match_code
+        self.team_a = team_a
+        self.team_b = team_b
+        self.bracket_id = bracket_id
+ 
+        # Team A wins
+        btn_a = discord.ui.Button(
+            label=f"✅ {team_a} Wins",
+            style=discord.ButtonStyle.primary,
+            custom_id=f"winner_a_{match_code}"
+        )
+        btn_a.callback = self._make_winner_callback(winning_team=1)
+        self.add_item(btn_a)
+ 
+        # Team B wins
+        btn_b = discord.ui.Button(
+            label=f"✅ {team_b} Wins",
+            style=discord.ButtonStyle.danger,
+            custom_id=f"winner_b_{match_code}"
+        )
+        btn_b.callback = self._make_winner_callback(winning_team=2)
+        self.add_item(btn_b)
+ 
+    def _make_winner_callback(self, winning_team: int):
+        async def callback(interaction: discord.Interaction):
+            if not interaction.user.guild_permissions.administrator:
+                await interaction.response.send_message(
+                    "❌ Only admins can record results.", ephemeral=True
+                )
+                return
+ 
+            await interaction.response.defer(ephemeral=True)
+ 
+            # Get the MatchResultsController to reuse existing logic
+            results_cog = self.bot.get_cog("MatchResultsController")
+            if not results_cog:
+                await interaction.followup.send(
+                    "❌ MatchResultsController not loaded.", ephemeral=True
+                )
+                return
+ 
+            db = Tournament_DB()
+            try:
+                # Populate bracket match with players first (if not already done)
+                results_cog._populate_bracket_match(db, self.match_code)
+
+                # Now process results normally — players exist in Matches table
+                results = {self.match_code: winning_team}
+                results_cog._process_match_results(db, results)
+
+                bracket_result = results_cog._advance_bracket_after_result(
+                    db, self.match_code, winning_team
+                )
+
+                await results_cog._sync_match_to_sheets(db, self.match_code)
+
+                self.parent_view.recorded.add(self.match_code)
+
+            finally:
+                db.close_db()
+
+            # Confirm to the admin (ephemeral)
+            winner_label = f"Team A (`{self.team_a}`)" if winning_team == 1 else f"Team B (`{self.team_b}`)"
+            await interaction.followup.send(
+                f"✅ Result recorded for `{self.match_code}` — {winner_label} wins!",
+                ephemeral=True
+            )
+ 
+            # Refresh parent button panel
+            await self.parent_view.refresh(interaction)
+ 
+            # Auto-post updated bracket image (public)
+            def generate():
+                thread_db = Tournament_DB()
+                try:
+                    from view.bracket_image import create_bracket_image
+                    return create_bracket_image(self.bracket_id, thread_db)
+                finally:
+                    thread_db.close_db()
+ 
+            try:
+                import asyncio
+                img_path = await asyncio.to_thread(generate)
+ 
+                # Check if tournament is complete
+                db2 = Tournament_DB()
+                try:
+                    db2.cursor.execute(
+                        "SELECT status FROM Brackets WHERE bracket_id = ?",
+                        (self.bracket_id,)
+                    )
+                    row = db2.cursor.fetchone()
+                    status = row[0] if row else "active"
+                finally:
+                    db2.close_db()
+ 
+                status_emoji = "🏆" if status == "complete" else "🟢"
+                embed = discord.Embed(
+                    title=f"📊 Bracket Update — {self.bracket_id}",
+                    description=f"{status_emoji} Status: **{status.upper()}**",
+                    color=discord.Color.gold() if status == "complete"
+                          else discord.Color.blue(),
+                )
+                import discord as _discord
+                file = _discord.File(img_path, filename=f"bracket_{self.bracket_id}.png")
+                embed.set_image(url=f"attachment://bracket_{self.bracket_id}.png")
+ 
+                # Post publicly in the same channel
+                await interaction.channel.send(embed=embed, file=file)
+ 
+                # Tournament complete announcement
+                if bracket_result and bracket_result.get("completed_bracket"):
+                    from common.bracket_helper import resolve_bracket_team
+                    from view.winners_image import create_winners_image
+ 
+                    winner_team_id = bracket_result["advanced_team_id"]
+ 
+                    # Resolve player mentions
+                    db3 = Tournament_DB()
+                    try:
+                        winner_players = resolve_bracket_team(db3, winner_team_id)
+                        mentions = " ".join(f"<@{p['user_id']}>" for p in winner_players)
+                    finally:
+                        db3.close_db()
+ 
+                    # Generate winners image in thread (Pillow is blocking)
+                    def generate_winners():
+                        thread_db = Tournament_DB()
+                        try:
+                            return create_winners_image(
+                                bracket_id=self.bracket_id,
+                                winner_team_id=winner_team_id,
+                                db=thread_db,
+                            )
+                        finally:
+                            thread_db.close_db()
+ 
+                    try:
+                        winners_img_path = await asyncio.to_thread(generate_winners)
+ 
+                        winners_embed = discord.Embed(
+                            title="🏆 Tournament Champions!",
+                            description=f"Congratulations to: {mentions}",
+                            color=discord.Color.gold(),
+                        )
+                        winners_file = discord.File(
+                            winners_img_path,
+                            filename=f"winners_{self.bracket_id}.png"
+                        )
+                        winners_embed.set_image(
+                            url=f"attachment://winners_{self.bracket_id}.png"
+                        )
+ 
+                        await interaction.channel.send(
+                            embed=winners_embed,
+                            file=winners_file
+                        )
+ 
+                    except Exception as win_ex:
+                        logger.error(f"Winners image failed: {win_ex}")
+                        # Fall back to text-only announcement
+                        await interaction.channel.send(
+                            f"🏆 **Tournament complete!** Congratulations to: {mentions}"
+                        )
+ 
+            except Exception as e:
+                logger.error(f"Auto bracket image failed: {e}")
+                await interaction.followup.send(
+                    f"⚠️ Result recorded but bracket image failed: {e}", ephemeral=True
+                )
+ 
+            self.stop()
+ 
+        return callback
+
 class MatchResultsController(commands.Cog):
     """Controller for managing match results"""
     
@@ -219,6 +545,78 @@ class MatchResultsController(commands.Cog):
             await interaction.response.send_message(f"Error recording match result: {str(ex)}")
         finally:
             db.close_db()
+
+    def _populate_bracket_match(self, db, bracket_match_code: str):
+        """
+        For a bracket round match code (e.g. match_3), copy the players
+        from the original matchmaking teams into the Matches table so that
+        _process_match_results can update their stats normally.
+
+        Only inserts if rows don't already exist for this bracket match code.
+        """
+        # Check if already populated
+        db.cursor.execute(
+            "SELECT COUNT(*) FROM Matches WHERE teamId = ?",
+            (bracket_match_code,)
+        )
+        if db.cursor.fetchone()[0] > 0:
+            return  # already populated, skip
+
+        # Get the team IDs from BracketMatches
+        db.cursor.execute(
+            "SELECT teamA_id, teamB_id FROM BracketMatches WHERE match_code = ?",
+            (bracket_match_code,)
+        )
+        row = db.cursor.fetchone()
+        if not row:
+            logger.error(f"_populate_bracket_match: no BracketMatch found for {bracket_match_code}")
+            return
+
+        teamA_id, teamB_id = row  # e.g. "match_1_team1", "match_2_team2"
+
+        teams = {
+            "team1": teamA_id,
+            "team2": teamB_id,
+        }
+
+        from model.dbc_model import Matches
+        matches_db = Matches(db_name=settings.DATABASE_NAME)
+        matches_db.connection = db.connection
+        matches_db.cursor = db.cursor
+        match_num = matches_db.get_next_match_id()
+
+        for team_slot, source_team_id in teams.items():
+            if not source_team_id:
+                continue
+
+            # Parse source match_code and teamUp from team_id string
+            if source_team_id.endswith("_team1"):
+                src_match_code = source_team_id[:-6]
+                src_team_up    = "team1"
+            elif source_team_id.endswith("_team2"):
+                src_match_code = source_team_id[:-6]
+                src_team_up    = "team2"
+            else:
+                continue
+
+            # Copy players from the original matchmaking match
+            db.cursor.execute(
+                "SELECT user_id, game_name FROM Matches WHERE teamId = ? AND teamUp = ?",
+                (src_match_code, src_team_up)
+            )
+            players = db.cursor.fetchall()
+
+            for user_id, game_name in players:
+                db.cursor.execute(
+                    """
+                    INSERT INTO Matches (user_id, game_name, teamUp, teamId, match_num, date_played)
+                    VALUES (?, ?, ?, ?, ?, date('now'))
+                    """,
+                    (user_id, game_name, team_slot, bracket_match_code, match_num)
+                )
+
+        db.connection.commit()
+        logger.info(f"Populated bracket match {bracket_match_code} with players from {teamA_id} vs {teamB_id}")
 
     def _process_match_results(self, db, match_results):
         """Process match results and update database

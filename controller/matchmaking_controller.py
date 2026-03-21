@@ -1,3 +1,5 @@
+from unittest import result
+
 import discord
 import asyncio
 import random
@@ -7,7 +9,9 @@ from discord.ext import commands
 from config import settings
 from model.dbc_model import Tournament_DB, Game
 from controller.genetic_match_making import GeneticMatchMaking
+from common.gemini_teamup import gemini_seed_teams
 from common.bracket_helper import create_4_team_bracket
+from controller.match_results_controller import BracketResultView
 
 logger = settings.logging.getLogger("discord")
 
@@ -133,123 +137,128 @@ class MatchmakingController(commands.Cog):
             )
 
     @app_commands.command(name="simulate_volunteers", description="Simulate volunteers for sitting out")
-    
+
     @app_commands.describe(count="Number of volunteers needed")
     async def simulate_volunteers(self, interaction: discord.Interaction, count: int = 4):
-        if interaction.user.guild_permissions.administrator:
-            db = Tournament_DB()
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message("Sorry, you don't have required permission to use this command", 
+            ephemeral=True
+            )
+            return
+        await interaction.response.defer(thinking=True)
+        db = Tournament_DB()
 
-            try:
-                # Get all players
-                db.cursor.execute("""
-                    SELECT p.user_id, p.game_name, p.tag_id, g.tier, g.rank 
-                    FROM player p
-                    JOIN game g ON p.user_id = g.user_id
-                    GROUP BY p.user_id
-                    HAVING MAX(g.game_date)
-                """)
+        try:
+            # Get all players
+            db.cursor.execute("""
+                SELECT p.user_id, p.game_name, p.tag_id, g.tier, g.rank 
+                FROM player p
+                JOIN game g ON p.user_id = g.user_id
+                GROUP BY p.user_id
+                HAVING MAX(g.game_date)
+            """)
 
-                all_players = []
-                for record in db.cursor.fetchall():
-                    user_id, game_name, tag_id, tier, rank = record
-                    all_players.append({
-                        'user_id': user_id,
-                        'game_name': game_name,
-                        'tier': tier.lower() if tier else 'default',
-                        'rank': rank if rank else ''
-                    })
+            all_players = []
+            for record in db.cursor.fetchall():
+                user_id, game_name, tag_id, tier, rank = record
+                all_players.append({
+                    'user_id': user_id,
+                    'game_name': game_name,
+                    'tier': tier.lower() if tier else 'default',
+                    'rank': rank if rank else ''
+                })
 
-                if len(all_players) < count:
-                    await interaction.response.send_message(
-                        f"Not enough players registered. Need at least {count} players, but only have {len(all_players)}."
-                    )
-                    return
-
-                # Mark some players as "volunteering"
-                volunteers = random.sample(all_players, count)
-
-                # Create a volunteer table for demo
-                volunteer_embed = discord.Embed(
-                    title=f"Simulated Volunteers ({count} players)",
-                    color=discord.Color.green(),
-                    description="These players have volunteered to sit out and receive participation points."
-                )
-
-                # Role color mapping (using League of Legends colors)
-                role_colors = {
-                    "top": "🟥",      # Red
-                    "jungle": "🟩",   # Green
-                    "mid": "🟨",      # Yellow
-                    "bottom": "🟦",   # Blue
-                    "support": "🟪",  # Purple
-                    "tbd": "⬜",      # White/empty
-                    "forced": "⬛"     # Black/forced
-                }
-                
-                for i, player in enumerate(volunteers):
-                    name = player.get('game_name')
-                    tier = player.get('tier', 'unknown').capitalize()
-                    rank = player.get('rank', '')
-                    
-                    # Try to get roles
-                    db.cursor.execute(
-                        "SELECT role FROM game WHERE user_id = ? ORDER BY game_date DESC LIMIT 1",
-                        (player.get('user_id'),)
-                    )
-                    role_result = db.cursor.fetchone()
-                    
-                    # Format roles with colors
-                    colored_roles = []
-                    if role_result and role_result[0]:
-                        try:
-                            roles = json.loads(role_result[0])
-                            if isinstance(roles, list):
-                                for role in roles:
-                                    role_lower = role.lower()
-                                    role_emoji = role_colors.get(role_lower, "⬜")
-                                    colored_roles.append(f"{role_emoji} {role.capitalize()}")
-                        except:
-                            pass
-                    
-                    role_str = '  '.join(colored_roles) if colored_roles else 'None'
-                    
-                    value_str = f"**Rank:** {tier} {rank}"
-                    if colored_roles:
-                        value_str += f"\n**Roles:** {role_str}"
-
-                    volunteer_embed.add_field(
-                        name=f"Player {i + 1}: {name}",
-                        value=value_str,
-                        inline=True
-                    )
-
-                # Record volunteers in database with "volunteer" status
-                session_id = f"volunteer_session_{int(asyncio.get_event_loop().time())}"
-                # Get the next match ID for the volunteer session
-                from model.dbc_model import Matches
-                matches_db = Matches(db_name=settings.DATABASE_NAME)
-                volunteer_match_num = matches_db.get_next_match_id()
-                for player in volunteers:
-                    user_id = player.get('user_id')
-                    if user_id:
-                        query = "INSERT INTO Matches(user_id, teamUp, teamId, match_num) VALUES(?, ?, ?, ?)"
-                        db.cursor.execute(query, (user_id, "volunteer", session_id, volunteer_match_num))
-
-                db.connection.commit()
-                db.close_db()
-
+            if len(all_players) < count:
                 await interaction.response.send_message(
-                    content=f"Simulated {count} volunteers for sitting out.",
-                    embed=volunteer_embed
+                    f"Not enough players registered. Need at least {count} players, but only have {len(all_players)}."
+                )
+                return
+
+            # Mark some players as "volunteering"
+            volunteers = random.sample(all_players, count)
+
+            # Create a volunteer table for demo
+            volunteer_embed = discord.Embed(
+                title=f"Simulated Volunteers ({count} players)",
+                color=discord.Color.green(),
+                description="These players have volunteered to sit out and receive participation points."
+            )
+
+            # Role color mapping (using League of Legends colors)
+            role_colors = {
+                "top": "🟥",      # Red
+                "jungle": "🟩",   # Green
+                "mid": "🟨",      # Yellow
+                "bottom": "🟦",   # Blue
+                "support": "🟪",  # Purple
+                "tbd": "⬜",      # White/empty
+                "forced": "⬛"     # Black/forced
+            }
+            
+            for i, player in enumerate(volunteers):
+                name = player.get('game_name')
+                tier = player.get('tier', 'unknown').capitalize()
+                rank = player.get('rank', '')
+                
+                # Try to get roles
+                db.cursor.execute(
+                    "SELECT role FROM game WHERE user_id = ? ORDER BY game_date DESC LIMIT 1",
+                    (player.get('user_id'),)
+                )
+                role_result = db.cursor.fetchone()
+                
+                # Format roles with colors
+                colored_roles = []
+                if role_result and role_result[0]:
+                    try:
+                        roles = json.loads(role_result[0])
+                        if isinstance(roles, list):
+                            for role in roles:
+                                role_lower = role.lower()
+                                role_emoji = role_colors.get(role_lower, "⬜")
+                                colored_roles.append(f"{role_emoji} {role.capitalize()}")
+                    except:
+                        pass
+                
+                role_str = '  '.join(colored_roles) if colored_roles else 'None'
+                
+                value_str = f"**Rank:** {tier} {rank}"
+                if colored_roles:
+                    value_str += f"\n**Roles:** {role_str}"
+
+                volunteer_embed.add_field(
+                    name=f"Player {i + 1}: {name}",
+                    value=value_str,
+                    inline=True
                 )
 
-            except Exception as ex:
-                logger.error(f"Error simulating volunteers: {ex}")
-                await interaction.response.send_message(f"Error simulating volunteers: {str(ex)}")
-                db.close_db()
+            # Record volunteers in database with "volunteer" status
+            session_id = f"volunteer_session_{int(asyncio.get_event_loop().time())}"
+            # Get the next match ID for the volunteer session
+            from model.dbc_model import Matches
+            matches_db = Matches(db_name=settings.DATABASE_NAME)
+            volunteer_match_num = matches_db.get_next_match_id()
+            for player in volunteers:
+                user_id = player.get('user_id')
+                if user_id:
+                    query = "INSERT INTO Matches(user_id, teamUp, teamId, match_num) VALUES(?, ?, ?, ?)"
+                    db.cursor.execute(query, (user_id, "volunteer", session_id, volunteer_match_num))
+
+            db.connection.commit()
+            db.close_db()
+
+            await interaction.followup.send_message(
+                content=f"Simulated {count} volunteers for sitting out.",
+                embed=volunteer_embed
+            )
+
+        except Exception as ex:
+            logger.error(f"Error simulating volunteers: {ex}")
+            await interaction.followup.send_message(f"Error simulating volunteers: {str(ex)}")
+            db.close_db()
         else:
             await interaction.response.send_message("Sorry, you don't have required permission to use this command",
-                                                  ephemeral=True)
+                                                ephemeral=True)
 
     @app_commands.command(name="run_matchmaking", description="Run matchmaking with registered players")
     @app_commands.describe(
@@ -510,7 +519,7 @@ class MatchmakingController(commands.Cog):
                                     team2.append(player)
                     elif matchmaking_method == "gemini":
                         try: 
-                            from controller.gemini_teamup import gemini_teamup, _validate_teamup_result
+                            from common.gemini_teamup import gemini_teamup, _validate_teamup_result
                             ai_result = await gemini_teamup(processed_players)
                             by_id = {str(p["user_id"]): p for p in processed_players}
                         except Exception as ex: 
@@ -775,71 +784,121 @@ class MatchmakingController(commands.Cog):
         match2="Second match code (e.g. match_2)"
     )
     async def create_bracket(self, interaction: discord.Interaction, match1: str, match2: str):
-        """Manually create a 4-team bracket from two existing match codes."""
+        """Manually create a seeded 4-team bracket from two existing match codes."""
+        await interaction.response.defer()
+ 
         db = Tournament_DB()
         try:
-            # Verify both matches exist in the Matches table
+            # Verify both matches exist
             for match_code in [match1, match2]:
                 db.cursor.execute(
-                    "SELECT COUNT(*) FROM Matches WHERE teamId = ?",
-                    (match_code,)
+                    "SELECT COUNT(*) FROM Matches WHERE teamId = ?", (match_code,)
                 )
-                count = db.cursor.fetchone()[0]
-                if count == 0:
-                    await interaction.response.send_message(
+                if db.cursor.fetchone()[0] == 0:
+                    await interaction.followup.send(
                         f"❌ Match `{match_code}` not found. Make sure you ran matchmaking first.",
                         ephemeral=True
                     )
                     return
-    
-            # Check a bracket doesn't already exist for these matches
+ 
+            # Duplicate bracket check
             bracket_id = f"bracket_{match1}_{match2}"
             db.cursor.execute(
-                "SELECT bracket_id FROM Brackets WHERE bracket_id = ?",
-                (bracket_id,)
+                "SELECT bracket_id FROM Brackets WHERE bracket_id = ?", (bracket_id,)
             )
             if db.cursor.fetchone():
-                await interaction.response.send_message(
-                    f"❌ A bracket for `{match1}` and `{match2}` already exists: `{bracket_id}`\n"
-                    f"Use `/show_bracket {bracket_id}` to view it.",
+                await interaction.followup.send(
+                    f"❌ Bracket `{bracket_id}` already exists. Use `/show_bracket {bracket_id}`.",
                     ephemeral=True
                 )
                 return
-    
-            # Build the 4 team IDs
-            teams = [
-                f"{match1}_team1",
-                f"{match1}_team2",
-                f"{match2}_team1",
-                f"{match2}_team2",
+ 
+            # ── Manual seeding ────────────────────────────────────────────────
+            candidate_teams = [
+                f"{match1}_team1", f"{match1}_team2",
+                f"{match2}_team1", f"{match2}_team2",
             ]
-    
-            # Create the bracket
-            result = create_4_team_bracket(db, bracket_id, teams)
-    
-            semi1 = result['matches'][0]
-            semi2 = result['matches'][1]
-            final = result['matches'][2]
-    
-            await interaction.response.send_message(
-                f"✅ Bracket **`{result['bracket_id']}`** created!\n\n"
-                f"**Seeded teams:**\n"
-                f"• `{teams[0]}` (from {match1})\n"
-                f"• `{teams[1]}` (from {match1})\n"
-                f"• `{teams[2]}` (from {match2})\n"
-                f"• `{teams[3]}` (from {match2})\n\n"
-                f"**Games to play — use these match codes:**\n"
-                f"🥊 Semifinal 1: `/record_match_result {semi1} <1 or 2>`\n"
-                f"🥊 Semifinal 2: `/record_match_result {semi2} <1 or 2>`\n"
-                f"🏆 Final:        `/record_match_result {final} <1 or 2>`  *(available after semis)*\n\n"
-                f"⚠️ **Important:** Use the match codes above (`{semi1}`, `{semi2}`, `{final}`) "
-                f"when recording results — NOT the original matchmaking codes (`{match1}`, `{match2}`).\n\n"
-                f"Use `/show_bracket {result['bracket_id']}` to view the bracket at any time."
+            team_scores = {}
+            team_player_counts = {}
+ 
+            for team_id in candidate_teams:
+                mc = team_id[:-6]
+                team_up = "team1" if team_id.endswith("_team1") else "team2"
+                db.cursor.execute(
+                    """
+                    SELECT COUNT(*), COALESCE(SUM(g.manual_tier), 0)
+                    FROM Matches m
+                    JOIN game g ON m.user_id = g.user_id
+                    WHERE m.teamId = ? AND m.teamUp = ?
+                    AND g.game_date = (
+                        SELECT MAX(game_date) FROM game WHERE user_id = m.user_id
+                    )
+                    """,
+                    (mc, team_up)
+                )
+                row = db.cursor.fetchone()
+                team_scores[team_id]        = round(row[1] if row else 0.0, 2)
+                team_player_counts[team_id] = row[0] if row else 0
+ 
+            seeded_teams = sorted(candidate_teams, key=lambda t: team_scores[t], reverse=True)
+ 
+            # ── Gemini seeding ────────────────────────────────────────────────
+            gemini_result = await gemini_seed_teams(candidate_teams, db)
+ 
+            # ── Create bracket ────────────────────────────────────────────────
+            result = create_4_team_bracket(db, bracket_id, seeded_teams)
+            semi1, semi2, final = result['matches']
+ 
+            # ── Build seeding messages ────────────────────────────────────────
+            manual_lines = ""
+            for i, team_id in enumerate(seeded_teams):
+                manual_lines += (
+                    f"**{i+1}.** `{team_id}` "
+                    f"— tier sum: **{team_scores[team_id]}** "
+                    f"({team_player_counts[team_id]} players)\n"
+                )
+ 
+            if gemini_result:
+                gemini_lines = ""
+                for entry in gemini_result:
+                    gemini_lines += (
+                        f"**{entry['seed']}.** `{entry['team_id']}` "
+                        f"— tier sum: **{entry['tier_sum']}**\n"
+                        f"   *{entry['reason']}*\n"
+                    )
+                gemini_order = [e["team_id"] for e in gemini_result]
+                agreement = (
+                    "✅ Gemini agrees with tier sum seeding."
+                    if gemini_order == seeded_teams
+                    else "⚠️ Gemini suggests a different order — bracket uses tier sum seeding."
+                )
+                gemini_section = f"🤖 **Gemini AI Seeding (advisory):**\n{gemini_lines}\n{agreement}"
+            else:
+                gemini_section = "🤖 **Gemini AI Seeding:** unavailable — using tier sum seeding."
+ 
+            # Message 1 — seeding info
+            await interaction.followup.send(
+                f"✅ Bracket **`{bracket_id}`** created!\n\n"
+                f"📊 **Tier Sum Seeding (used for bracket):**\n{manual_lines}\n"
+                f"{gemini_section}"
             )
-    
+ 
+            # Message 2 — interactive result buttons
+            bracket_view = BracketResultView(
+                bot=self.bot,
+                bracket_id=bracket_id,
+                matches=[semi1, semi2, final],
+                bracket_id_for_image=bracket_id,
+            )
+            msg = await interaction.followup.send(
+                content=bracket_view._status_text(),
+                view=bracket_view
+            )
+            bracket_view.message = msg  # Store message reference for updates
+ 
         except Exception as ex:
             logger.error(f"create_bracket failed: {ex}")
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 f"❌ Failed to create bracket: {str(ex)}", ephemeral=True
             )
         finally:

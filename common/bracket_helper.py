@@ -99,10 +99,6 @@ def create_4_team_bracket(db, bracket_id: str, teams: list[str]):
         raise
 
 def resolve_bracket_team(db, bracket_team_id: str) -> list[dict]:
-    """
-    Resolves 'match_16_team1' → list of player dicts.
-    Returns [] if slot is unfilled (future bracket match).
-    """
     if not bracket_team_id:
         return []
 
@@ -115,9 +111,9 @@ def resolve_bracket_team(db, bracket_team_id: str) -> list[dict]:
     else:
         raise ValueError(f"Invalid bracket_team_id format: '{bracket_team_id}'")
 
-    cursor = db.cursor.execute(
+    db.cursor.execute(
         """
-        SELECT p.*
+        SELECT p.user_id, p.game_name
         FROM Matches m
         JOIN player p ON m.user_id = p.user_id
         WHERE m.teamId = ? AND m.teamUp = ?
@@ -125,7 +121,9 @@ def resolve_bracket_team(db, bracket_team_id: str) -> list[dict]:
         (match_code, team_up)
     )
     rows = db.cursor.fetchall()
-    return [dict(row) for row in rows]
+
+    
+    return [{"user_id": row[0], "game_name": row[1]} for row in rows]
 
 
 def declare_tournament_winner(db, winner_team_id: str):
